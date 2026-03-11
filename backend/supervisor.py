@@ -24,6 +24,7 @@ class AppState(TypedDict):
     
     # --- Math用データ ---
     selected_tex: str
+    selected_image: str
     action_type: str
     math_result: str
     

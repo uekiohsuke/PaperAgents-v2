@@ -8,6 +8,7 @@ import json
 import asyncio
 from pdf_parser import PaperParser
 from supervisor import app_graph
+from pdf_parser import PaperParser
 
 # アプリ立ち上げ時にPDFを解析してメモリに保持(仮)
 print("⏳ PDFを解析中...")
@@ -53,6 +54,13 @@ app.add_middleware(
 # ==========================================
 # エンドポイント
 # ==========================================
+@app.get("/api/pdf_info")
+def get_pdf_info():
+    return {
+        "toc": pdf_parser.toc,
+        "references": pdf_parser.references
+    }
+
 @app.post("/api/agent")
 async def run_agent(request: AgentRequest):
     print(f"\n📨 リクエスト受信: タスクタイプ [{request.task_type}]")
@@ -60,15 +68,14 @@ async def run_agent(request: AgentRequest):
     async def event_generator():
         current_context = request.context.current_context
         target_reference = request.payload.target_reference_text
-        selected_tex = request.payload.selected_tex
-        
+
         state = {
             "task_type": request.task_type,
             "current_context": current_context,
             "paper_metadata": request.context.paper_metadata or "",
             "selected_text": request.payload.selected_text or "",
             "user_intent": request.payload.user_intent or "",
-            "selected_tex": selected_tex or "", # ※Mathの画像->TeX変換は一旦保留、ダミーデータを流す
+            "selected_tex": request.payload.selected_tex or "",
             "selected_image": request.payload.selected_image or "",
             "action_type": request.payload.action_type or "",
             "selected_citation": request.payload.selected_citation or "",
@@ -78,8 +85,8 @@ async def run_agent(request: AgentRequest):
 
         yield f"data: {json.dumps({'status': 'info', 'message': '🧠 エージェントが推論中...'})}\n\n"
 
-        # QAタスク
-        if request.task_type == "qa" and request.payload.selected_text:
+        # QA/Mathタスク
+        if request.task_type in ["qa", "math"] and (request.payload.selected_text or request.payload.selected_image):
             # ページ横断の完璧な文脈をバックエンドで取得し直す
             backend_context = pdf_parser.get_context_around(request.payload.selected_text, window_size=400)
             if backend_context and backend_context != request.payload.selected_text:
@@ -95,15 +102,6 @@ async def run_agent(request: AgentRequest):
                 print(f"📚 引用元を特定しました: {target_reference[:40]}...")
             else:
                 print("⚠️ 指定された引用番号が見つかりませんでした。")
-        
-        # Mathタスク
-        elif request.task_type == "math" and request.payload.selected_image:
-            print("📸 画像データを受信しました！ OCRでTeXに変換します...(仮)")
-            
-            # VLM等OCRを想定したダミーtex
-            dummy_tex = r"P = \frac{NRT}{N_{A}V}"
-            selected_tex = dummy_tex 
-            print(f"🧮 変換されたTeX: {selected_tex}")
 
         # 強化されたデータを使って LangGraph に渡す State を構築
         state = {
@@ -112,7 +110,7 @@ async def run_agent(request: AgentRequest):
             "paper_metadata": request.context.paper_metadata or "",
             "selected_text": request.payload.selected_text or "",
             "user_intent": request.payload.user_intent or "",
-            "selected_tex": selected_tex or "",
+            "selected_tex": request.payload.selected_tex or "",
             "selected_image": request.payload.selected_image or "",
             "action_type": request.payload.action_type or "",
             "selected_citation": request.payload.selected_citation or "",

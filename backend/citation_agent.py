@@ -4,13 +4,22 @@ import urllib.parse
 from functools import lru_cache
 from typing import TypedDict, Optional
 from langgraph.graph import StateGraph, START, END
-from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 from langchain_core.output_parsers import JsonOutputParser
-from dotenv import load_dotenv # 🌟 追加
+from langchain_openai import ChatOpenAI
+from dotenv import load_dotenv
 
 load_dotenv()
+
+llm = ChatOpenAI(
+    base_url=os.environ.get("LOCAL_OPENAI_BASE_URL", "http://127.0.0.1:1234/v1"),
+    api_key=os.environ.get("LOCAL_OPENAI_API_KEY", "dummy"),
+    model=os.environ.get("LOCAL_OPENAI_MODEL_NAME", "qwen3:14b"),
+    temperature=0.2,
+    # streaming=True 
+)
+
 EMAIL = os.environ.get("CROSSREF_EMAIL", "default@example.com")
 
 # ==========================================
@@ -99,8 +108,6 @@ class CitationState(TypedDict):
     target_reference_text: str
     paper_info: dict
     relevance_explanation: str
-
-llm = ChatOllama(model="qwen3:14b", temperature=0.2)
 
 # ==========================================
 # プロンプト定義

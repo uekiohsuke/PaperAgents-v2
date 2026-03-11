@@ -3,6 +3,11 @@ import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
 import './App.css';
+import ReactMarkdown from 'react-markdown';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import 'katex/dist/katex.min.css';
+import remarkBreaks from 'remark-breaks';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.mjs',
@@ -23,12 +28,16 @@ type Message = {
   sourceText?: string; // 参照したテキスト（チップ表示用）
   sourceImage?: string; // 参照した画像（チップ表示用）
   paperInfo?: any; // Citation時のメタデータ
+  sourcePage?: number; // 参照対象のページ
 };
 
 function App() {
   // PDFページ番号state
   const [numPages, setNumPages] = useState<number>();
   const [pageNumber, setPageNumber] = useState<number>(1);
+
+  const [outline, setOutline] = useState<any[]>([]); // PDFから抽出した目次データ
+  const [isTocOpen, setIsTocOpen] = useState<boolean>(false); // 目次ペインの開閉状態
   
   // 選択文章と周辺文脈state
   const [selectedText, setSelectedText] = useState<string>("");
@@ -51,13 +60,60 @@ function App() {
   const [snipBox, setSnipBox] = useState<{ x: number, y: number, w: number, h: number } | null>(null);
   const [croppedImage, setCroppedImage] = useState<string | null>(null);
 
-  function onDocumentLoadSuccess({ numPages }: { numPages: number }) {
-    setNumPages(numPages);
-  }
+  // 通信のキャンセルを管理するコントローラー
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  // メッセージを履歴から削除する関数
+  const deleteMessage = (targetId: string) => {
+    setMessages((prev) => prev.filter(msg => msg.id !== targetId));
+  };
+
+  // 生成を強制ストップする関数
+  const stopGeneration = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  const jumpToPage = (pageStr: string | number) => {
+    // pdf.js の getOutline が返す dest は文字列の場合があるため安全に数値化
+    let targetPage = typeof pageStr === "string" ? parseInt(pageStr.replace(/[^0-9]/g, "")) : pageStr;
+    if (targetPage && targetPage > 0 && numPages && targetPage <= numPages) {
+      setPageNumber(targetPage);
+    }
+  };
+
+// ハイブリッド目次抽出ロジック
+  async function onDocumentLoadSuccess(pdf: any) {
+    setNumPages(pdf.numPages);
+    try {
+      const outlineData = await pdf.getOutline();
+      
+      if (outlineData && outlineData.length > 0) {
+        // メタデータが存在すればそれをセット
+        setOutline(outlineData);
+      } else {
+        console.log("PDFに目次メタデータがありません。バックエンドの自前パーサーを呼び出します...");
+        const res = await fetch("http://127.0.0.1:8000/api/pdf_info");
+        const data = await res.json();
+        
+        // Pythonのフォーマット [level, title, page_num] をフロントエンド用にマッピング
+        const fallbackOutline = data.toc.map((item: any[]) => ({
+          title: item[1], // "1 はじめに" などの文字列
+          dest: item[2],  // ページ番号
+          level: item[0]  // インデント表示などに使える階層レベル
+        }));
+        
+        setOutline(fallbackOutline);
+      }
+    } catch (error) {
+      console.error("目次の抽出に失敗しました:", error);
+    }
+  }
 
 // テキスト選択
   const handleMouseUp = () => {
@@ -174,6 +230,7 @@ function App() {
     if (!selectedText && !croppedImage && !customText) return; 
     setIsLoading(true);
     setCurrentTask(taskType);
+    abortControllerRef.current = new AbortController();
 
     // ユーザーのメッセージを配列に追加
     const userMsgId = Date.now().toString();
@@ -184,6 +241,7 @@ function App() {
       content: customText || `[${subOption}] をリクエストしました`, 
       sourceText: selectedText,
       sourceImage: croppedImage || undefined,
+      sourcePage: pageNumber,
     };
 
     // AIの返答用空枠を配列に追加
@@ -224,6 +282,7 @@ function App() {
       const response = await fetch("http://127.0.0.1:8000/api/agent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: abortControllerRef.current.signal,
         body: JSON.stringify({
           task_type: taskType,
           context: { paper_metadata: "Sample Physics Report", current_context: currentContext },
@@ -268,18 +327,72 @@ function App() {
           }
         }
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error(error);
-      setMessages((prev) => prev.map(msg => 
-        msg.id === aiMsgId ? { ...msg, content: "⚠️ 通信エラーが発生しました。" } : msg
-      ));
+      if (error.name === 'AbortError') {
+        console.log("生成が中断されました");
+        setMessages((prev) => prev.filter(msg => msg.id !== userMsgId && msg.id !== aiMsgId));
+      } else {
+        console.error(error);
+        setMessages((prev) => prev.map(msg => 
+          msg.id === aiMsgId ? { ...msg, content: "⚠️ 通信エラーが発生しました。" } : msg
+        ));
+      }
     } finally {
       setIsLoading(false);
+      abortControllerRef.current = null;
     }
   };
 
   return (
     <div className="app-container">
+      {/* 格納可能な目次(TOC)ペイン */}
+      <div style={{ 
+        width: isTocOpen ? "250px" : "40px", 
+        background: "#e9ecef", 
+        borderRight: "1px solid #ccc",
+        transition: "width 0.3s ease",
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden"
+      }}>
+        <div 
+          onClick={() => setIsTocOpen(!isTocOpen)} 
+          style={{ padding: "15px 10px", cursor: "pointer", fontWeight: "bold", background: "#dee2e6", display: "flex", justifyContent: "center", alignItems: "center", borderBottom: "1px solid #ccc", whiteSpace: "nowrap" }}
+        >
+          {isTocOpen ? "📑 目次を閉じる" : "📑"}
+        </div>
+        
+        {isTocOpen && (
+          <div style={{ padding: "10px", overflowY: "auto", flex: 1, fontSize: "0.9em" }}>
+            {outline && outline.length > 0 ? (
+              <ul style={{ listStyleType: "none", padding: 0, margin: 0 }}>
+                {outline.map((item, index) => {
+                  // Pythonバックエンドから来た level 情報があれば字下げする
+                  const indent = item.level ? (item.level - 1) * 15 : 0;
+                  
+                  return (
+                    <li key={index} style={{ marginBottom: "8px", marginLeft: `${indent}px` }}>
+                      <span 
+                        onClick={() => {
+                          const target = Array.isArray(item.dest) ? item.dest[0] : item.dest;
+                          if(target) jumpToPage(target);
+                        }} 
+                        style={{ color: "#0056b3", cursor: "pointer", textDecoration: "underline" }}
+                      >
+                        {item.title}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : (
+              <div style={{ color: "#777", textAlign: "center", marginTop: "20px" }}>目次データを抽出中です...</div>
+            )}
+          </div>
+        )}
+      </div>
+      {/* PDFペイン */}
       <div className="pdf-pane" onMouseUp={handleMouseUp}>
         <div className="pdf-controls">
           <button disabled={pageNumber <= 1} onClick={() => setPageNumber(pageNumber - 1)}>◀ 前へ</button>
@@ -329,17 +442,48 @@ function App() {
             messages.map((msg) => (
               <div key={msg.id} style={{ marginBottom: "20px", display: "flex", flexDirection: "column", alignItems: msg.role === "user" ? "flex-end" : "flex-start" }}>
                 
-                <div style={{ maxWidth: "80%", background: msg.role === "user" ? "#e3f2fd" : "#fff", padding: "12px", borderRadius: "8px", border: "1px solid #dee2e6", boxShadow: "0 1px 3px rgba(0,0,0,0.05)" }}>
+                <div style={{ position: "relative", maxWidth: "80%", background: msg.role === "user" ? "#e3f2fd" : "#fff", padding: "12px", borderRadius: "8px", border: "1px solid #dee2e6", boxShadow: "0 1px 3px rgba(0,0,0,0.05)" }}>
+                  
+                  {/* メッセージ削除ボタン */}
+                  <button 
+                    onClick={() => deleteMessage(msg.id)}
+                    style={{ position: "absolute", top: "-10px", right: "-10px", background: "#ffcdd2", color: "#c62828", border: "1px solid #ef9a9a", borderRadius: "50%", width: "24px", height: "24px", cursor: "pointer", fontSize: "0.8em", display: "flex", justifyContent: "center", alignItems: "center", zIndex: 5 }}
+                    title="このメッセージを削除"
+                  >
+                    ×
+                  </button>
                   
                   {/* ユーザーの質問に紐づく参照チップ */}
                   {msg.sourceText && (
                     <div style={{ fontSize: "0.8em", background: "rgba(0,0,0,0.05)", padding: "4px 8px", borderRadius: "4px", borderLeft: "3px solid #1976d2", marginBottom: "8px", color: "#555" }}>
-                      📝 {msg.sourceText.length > 50 ? msg.sourceText.substring(0, 50) + "..." : msg.sourceText}
+                      <span>📝 {msg.sourceText.length > 50 ? msg.sourceText.substring(0, 50) + "..." : msg.sourceText}</span>
+                      {msg.sourcePage && (
+                        <button onClick={() => jumpToPage(msg.sourcePage!)} style={{ marginLeft: "10px", background: "#1976d2", color: "white", border: "none", borderRadius: "3px", padding: "2px 6px", cursor: "pointer", fontSize: "0.9em", whiteSpace: "nowrap" }}>
+                          📍 P.{msg.sourcePage - 1} へ戻る
+                        </button>
+                      )}
                     </div>
                   )}
                   {msg.sourceImage && (
-                    <div style={{ marginBottom: "8px" }}>
-                      <img src={msg.sourceImage} alt="ref" style={{ maxHeight: "60px", border: "1px solid #ccc", borderRadius: "4px" }} />
+                    <div style={{ 
+                      marginBottom: "8px", 
+                      display: "flex", 
+                      alignItems: "center", 
+                      justifyContent: "space-between", 
+                      background: "rgba(230, 81, 0, 0.05)", 
+                      padding: "8px", 
+                      borderRadius: "4px", 
+                      borderLeft: "3px solid #e65100" 
+                    }}>
+                      <img src={msg.sourceImage} alt="ref" style={{ maxHeight: "60px", border: "1px solid #ccc", borderRadius: "4px", background: "#fff" }} />
+                      {msg.sourcePage && (
+                        <button 
+                          onClick={() => jumpToPage(msg.sourcePage!)} 
+                          style={{ marginLeft: "10px", background: "#e65100", color: "white", border: "none", borderRadius: "3px", padding: "4px 8px", cursor: "pointer", fontSize: "0.85em", whiteSpace: "nowrap" }}
+                        >
+                          📍 P.{msg.sourcePage - 1} へ戻る
+                        </button>
+                      )}
                     </div>
                   )}
 
@@ -409,7 +553,14 @@ function App() {
                   )}
 
                   {/* メッセージ本文 */}
-                  <div style={{ whiteSpace: "pre-wrap", color: "#333" }}>{msg.content}</div>
+                  <div style={{ color: "#333", fontSize: "0.95em", lineHeight: "1.6", overflowX: "auto", maxWidth: "100%" }}>
+                    <ReactMarkdown 
+                      remarkPlugins={[remarkBreaks, remarkMath]} 
+                      rehypePlugins={[rehypeKatex]}
+                    >
+                      {msg.content}
+                    </ReactMarkdown>
+                  </div>
                   
                   {/* ローディング表示 */}
                   {isLoading && msg.role === "ai" && !msg.content && (
@@ -424,7 +575,18 @@ function App() {
 
         {/* 入力・操作エリア */}
         <div className="chat-input-area" style={{ flexShrink: 0, borderTop: "1px solid #dee2e6", padding: "15px", background: "#fff" }}>
-          
+          {/* 中断ボタン */}
+          {isLoading && (
+            <div style={{ display: "flex", justifyContent: "center", marginBottom: "15px" }}>
+              <button 
+                onClick={stopGeneration}
+                style={{ background: "#d32f2f", color: "white", border: "none", padding: "8px 16px", borderRadius: "20px", cursor: "pointer", boxShadow: "0 2px 5px rgba(0,0,0,0.2)", display: "flex", alignItems: "center", gap: "5px", fontSize: "0.9em", fontWeight: "bold" }}
+              >
+                ⏹️ 生成を中断する
+              </button>
+            </div>
+          )}
+
           {/* 選択中のターゲット表示 */}
           {(selectedText || croppedImage) && (
             <div style={{ marginBottom: "10px", fontSize: "0.9em", display: "flex", alignItems: "center", gap: "10px", background: "#f1f3f5", padding: "8px", borderRadius: "4px" }}>

@@ -1,9 +1,22 @@
 import json
 from typing import TypedDict, List, Dict
 from langgraph.graph import StateGraph, START, END
-from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
+
+import os
+from langchain_openai import ChatOpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
+
+llm = ChatOpenAI(
+    base_url=os.environ.get("LOCAL_OPENAI_BASE_URL", "http://127.0.0.1:1234/v1"),
+    api_key=os.environ.get("LOCAL_OPENAI_API_KEY", "dummy"),
+    model=os.environ.get("LOCAL_OPENAI_MODEL_NAME", "qwen3:14b"),
+    temperature=0.2,
+    # streaming=True 
+)
 
 # 1Stateの定義
 class QAState(TypedDict):
@@ -14,8 +27,6 @@ class QAState(TypedDict):
     user_intent: str      # "explain"解説, "intent"意図, "example"具体例, "summarize"要約, "evidence"根拠 のいずれか
     qa_answer: str
     dict_suggestions: str
-
-llm = ChatOllama(model="qwen3:14b", temperature=0.2)
 
 # ==========================================
 # 意図（カテゴリ）から具体的な指示へのマッピング
@@ -132,6 +143,8 @@ def qa_agent_node(state: QAState):
         answer_text = raw_output
         dict_json_str = "[]"
         
+    print("QA Agent 作業終了")
+
     return {
         "qa_answer": answer_text,
         "dict_suggestions": dict_json_str

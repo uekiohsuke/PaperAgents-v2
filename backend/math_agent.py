@@ -1,62 +1,91 @@
-from typing import TypedDict
+import os
+import json
+from typing import TypedDict, Optional
+from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, START, END
-from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_openai import ChatOpenAI
+from langchain_core.output_parsers import JsonOutputParser
+from dotenv import load_dotenv
+
+load_dotenv()
+
+llm = ChatOpenAI(
+    base_url=os.environ.get("LOCAL_OPENAI_BASE_URL", "http://127.0.0.1:1234/v1"),
+    api_key=os.environ.get("LOCAL_OPENAI_API_KEY", "dummy"),
+    model=os.environ.get("LOCAL_OPENAI_MODEL_NAME", "qwen3:14b"),
+    temperature=0.2,
+    # streaming=True 
+)
 
 class MathState(TypedDict):
     selected_tex: str
+    selected_image: str
     action_type: str
     current_context: str
     math_result: str
 
-llm = ChatOllama(model="qwen3:14b", temperature=0)
+# ==========================================
+# VLMによるOCRと構造化
+# ==========================================
+class MathData(BaseModel):
+    extracted_content: str = Field(description="画像から読み取った文章と数式を統合したテキスト（数式部分は必ずLaTeX形式の $$ または $ を使用）")
+    variables: list[dict] = Field(description="数式に含まれる主要な変数（記号）と、その物理的・数学的な意味のリスト")
+
+parser = JsonOutputParser(pydantic_object=MathData)
 
 # ==========================================
-# プロンプトの定義
+# パターンA：式の意味（何を言いたいか、直感的な解剖）
 # ==========================================
-# パターンA：全体の導出（derivation）
-prompt_derivation = ChatPromptTemplate.from_messages([
+prompt_explain = ChatPromptTemplate.from_messages([
     ("system", r"""あなたは物理学と数学の専門エージェントです。
-与えられた数式の一般的な導出過程を、初学者がつまずかないようステップバイステップで出力してください。
+ユーザーは、提示された数式が「物理的・数学的に何を意味しているのか」「何を表しているのか」を直感的に理解したいと考えています。
 
 【重要なフォーマット指示】
-1. 数式は必ずブロック形式のTeX（$$数式$$）で独立した行に出力してください。
-2. Step 1には必ず「出発点となる実際の数式」を出力してください。「(出発点となる式)」のような文字列は絶対に出力せず、具体的な数式に置き換えてください。
-3. 最後に「補足説明」としてまとめるのではなく、解説は必ず各ステップの「■ 解説:」の後に含めてください。
+1. ステップバイステップの計算過程（導出）は絶対に出力しないでください。式の「意味の解剖」に徹してください。
+2. 専門用語の羅列を避け、初学者がイメージしやすい具体例や比喩を交えて解説してください。
+3. 出力は必ず以下のレイアウト（【全体の意味】、【各項の役割】、【物理的・数学的な意義】）を厳守してください。
+4. 数式は必ずブロック形式のTeX（$$数式$$）またはインライン形式のTeX（$数式$）を使用してください。
+5. 数式の前後には必ず「空行（改行2回）」を入れて、見やすく出力してください。
 
 【出力例】
-[Step 1]
-$$P^\mu = (E/c, \mathbf{{p}})$$
-■ 解説: 4元運動量の定義です。これはどの慣性系から見ても変わらない不変量を作るための出発点となります。
+（入力がシュレディンガー方程式だった場合）
 
-[Step 2] 《操作: 4元運動量の内積（ローレンツ不変量）を計算する》
-$$P^\mu P_\mu = (E/c)^2 - p^2 = (mc)^2$$
-■ 解説: 具体的に内積を計算し整理すると、右辺は $(mc)^2$ になります。
+【全体の意味】
+この式は、量子力学における「粒子の波としての振る舞い（波動関数）」が、時間とともにどのように変化するかを表す最も基本的な方程式です。古典力学におけるニュートンの運動方程式（$F=ma$）に相当します。
 
-[Step 3] 《操作: 静止系（p = 0）の条件を代入する》
-$$E = mc^2$$
-■ 解説: 物体が静止している状態を代入することで得られます。
+【各項の役割】
+- 左辺 $i\hbar \frac{{\partial}}{{\partial t}}\Psi$ : 波動関数 $\Psi$ の時間変化（エネルギー）を表します。
+- 右辺第1項 $-\frac{{\hbar^2}}{{2m}}\nabla^2\Psi$ : 粒子の「運動エネルギー」を表します。波の空間的な曲がり具合から計算されます。
+- 右辺第2項 $V\Psi$ : 粒子が受ける「位置エネルギー（ポテンシャル）」を表します。
 
+【物理的・数学的な意義】
+この式を解くことで、電子などが空間のどこにどれくらいの確率で存在するかが分かり、原子の構造や化学反応の仕組みを理論的に計算できるようになります。
 ---
-上記に従い、以下の数式の導出過程を出力してください。
+上記に従い、以下の数式の意味を直感的に解説してください。
 """),
-    ("human", "以下の数式の導出過程を教えてください。\n数式: {selected_tex}")
+    ("human", "【対象の数式】\n$$ {clean_tex} $$\n\n【数式に含まれる変数の情報】\n{variables_info}\n\n【周辺の文脈】\n{current_context}\n\nこの数式が何を言いたいのか、意味を解説してください。")
 ])
 
-# パターンB：行間の解説・文脈からの推論（explain_step）
-prompt_explain_step = ChatPromptTemplate.from_messages([
+# ==========================================
+# パターンB：式の導出（前提からの推論、行間の補完）
+# ==========================================
+prompt_derivation = ChatPromptTemplate.from_messages([
     ("system", r"""あなたは物理学と数学の専門エージェントです。
-ユーザーは、提示された数式の「変形操作そのもの」や「行間の飛躍」に躓いています。
+ユーザーは、提示された数式の「一般的な導出過程」や「行間の飛躍（式変形）」に躓いています。
 
 【前提の推論ルール】
-1. ユーザーが単一の式のみを選択している場合、提供された【周辺の文脈】から、直前の式や前提条件を推論して出発点（Step 1）に設定してください。
+1. ユーザーが単一の式のみを選択している場合、提供された【周辺の文脈】から、直前の式や前提条件を推論して出発点（Step 1）に設定し、目的の式までの導出を行ってください。
 2. 文脈に明記されていない場合でも、物理・数学の一般的な基本法則（定義式など）であれば、あなたの知識を用いてそれをStep 1として補足して解説を始めてください。
 3. ユーザーが2つの式を選択している（「式Aから式B」という指定がある）場合は、その2式間の行間を埋めることに専念してください。
 
 【重要なフォーマット指示】
 1. 最後に「まとめ」「結論」「補足」などの項目を絶対に作らないでください。すべての解説は各ステップの「■ 解説:」の中に収め、Stepが終わったら直ちに出力を終了してください。
 2. 数式は必ずブロック形式のTeX（$$数式$$）で独立した行に出力してください。
-3. 飛躍している計算過程を、非常に細かいStepに分割して提示してください。
+3. Step 1には必ず「出発点となる実際の数式」を出力してください。「(出発点となる式)」のような文字列は絶対に出力しないでください。
+4. 飛躍している計算過程を、非常に細かいStepに分割して提示してください。
+5. 各Stepの区切りや、数式の前後には必ず「空行（改行2回）」を入れて、見やすく出力してください。
 
 【出力例】
 （入力が「 \int x e^x dx から x e^x - e^x への変形 」だった場合）
@@ -82,31 +111,63 @@ $$ x e^x - e^x $$
 ---
 上記に従い、以下の数式・変形の詳細な操作解説を出力してください。
 """),
-    ("human", "【選択された数式】\n{selected_tex}\n\n【周辺の文脈（参考）】\n{current_context}")
+    ("human", "【対象の数式】\n$$ {clean_tex} $$\n\n【数式に含まれる変数の情報】\n{variables_info}\n\n【周辺の文脈】\n{current_context}\n\n上記の数式の導出過程（式変形）を詳細に教えてください。")
 ])
 
 # ==========================================
 # エージェントのノード処理
 # ==========================================
 def math_agent_node(state: MathState):
-    print(f"🧮 Math Agent起動中... (モード: {state['action_type']})")
+    action_type = state.get("action_type", "explain_step")
+    image_url = state.get("selected_image", "")
+    selected_tex = state.get("selected_tex", "")
     
-    if state["action_type"] == "derivation":
-        target_prompt = prompt_derivation
-    elif state["action_type"] == "explain_step":
-        target_prompt = prompt_explain_step
+    print(f"🧮 Math Agent起動中... (モード: {action_type})")
+
+    print("  => Step 1: 数式の解析（OCR/構造化）を開始...")
+    
+    if image_url:
+        print("OCRを実行します...")
+        target_content = [
+            {"type": "text", "text": f"以下の画像に含まれる「文章」と「数式」をすべて正確に読み取り、マークダウン形式で抽出してください。数式部分は必ずLaTeX形式にしてください。\nまた、登場する変数の意味も抽出してください。\n\n【重要】JSONの構文エラーを防ぐため、LaTeXのコマンド（例: \\frac, \\partial）のバックスラッシュは必ず2つ（例: \\\\frac, \\\\partial）にエスケープして出力してください。\n\n{parser.get_format_instructions()}"},
+            {"type": "image_url", "image_url": {"url": image_url}}
+        ]
     else:
-        target_prompt = prompt_derivation
-        
-    chain = target_prompt | llm
+        target_content = [
+            {"type": "text", "text": f"以下のLaTeX数式に含まれる変数の意味を抽出して整理してください。\n\n【数式】\n{selected_tex}\n\n{parser.get_format_instructions()}"}
+        ]
+
+    messages_step1 = [
+        SystemMessage(content="あなたは数式処理と物理モデルの解析に長けたAIです。"),
+        HumanMessage(content=target_content)
+    ]
+
+    try:
+        response_step1 = llm.invoke(messages_step1)
+        math_data = parser.invoke(response_step1)
+        clean_tex = math_data["extracted_content"]
+        variables_info = json.dumps(math_data["variables"], ensure_ascii=False, indent=2)
+        print(f"  ✨ OCR成功: {clean_tex}")
+    except Exception as e:
+        print(f"  ⚠️ OCR失敗（フォールバック）: {e}")
+        # 失敗した場合は元のテキストをそのまま使う
+        clean_tex = selected_tex if selected_tex else "（画像読み取り失敗）"
+        variables_info = "抽出なし"
+
+    print("  => Step 2: 導出・解説の生成を開始...")
     
-    # 辞書型で変数を渡す。current_context が無い場合はデフォルト文字を入れる
-    response = chain.invoke({
-        "selected_tex": state["selected_tex"],
+    target_prompt = prompt_derivation if action_type == "derivation" else prompt_explain
+    chain_step2 = target_prompt | llm
+    
+    response_step2 = chain_step2.invoke({
+        "clean_tex": clean_tex,
+        "variables_info": variables_info,
         "current_context": state.get("current_context", "特に文脈情報なし")
     })
+
+    print("Math Agent 作業終了")
     
-    return {"math_result": response.content}
+    return {"math_result": response_step2.content}
 
 # グラフ構築
 graph_builder = StateGraph(MathState)
@@ -118,27 +179,27 @@ math_graph = graph_builder.compile()
 # ==========================================
 # 実行テスト
 # ==========================================
-if __name__ == "__main__":
-    # テストA：論文で「前提の式が省略されている」ケース
-    test_context_infer = {
-        "selected_tex": r"E_n = \frac{n^2 h^2}{8mL^2}", 
-        "action_type": "explain_step",
-        "current_context": r"1次元の無限に深い井戸型ポテンシャル（幅 $L$）の中の電子を考える。境界条件 $\psi(0) = \psi(L) = 0$ を適用すると、エネルギー準位は次のように量子化されることが容易にわかる。",
-        "math_result": ""
-    }
+# if __name__ == "__main__":
+#     # テストA：論文で「前提の式が省略されている」ケース
+#     test_context_infer = {
+#         "selected_tex": r"E_n = \frac{n^2 h^2}{8mL^2}", 
+#         "action_type": "explain_step",
+#         "current_context": r"1次元の無限に深い井戸型ポテンシャル（幅 $L$）の中の電子を考える。境界条件 $\psi(0) = \psi(L) = 0$ を適用すると、エネルギー準位は次のように量子化されることが容易にわかる。",
+#         "math_result": ""
+#     }
 
-    # テストB：ユーザーが「式Aから式B」を明示的に選択したケース
-    test_explicit_jump = {
-        "selected_tex": r"e^{ix} = \cos x + i \sin x から \cos x = \frac{e^{ix} + e^{-ix}}{2} への変形", 
-        "action_type": "explain_step",
-        "current_context": r"オイラーの公式を用いると、三角関数は指数関数で表現できる。",
-        "math_result": ""
-    }
+#     # テストB：ユーザーが「式Aから式B」を明示的に選択したケース
+#     test_explicit_jump = {
+#         "selected_tex": r"e^{ix} = \cos x + i \sin x から \cos x = \frac{e^{ix} + e^{-ix}}{2} への変形", 
+#         "action_type": "explain_step",
+#         "current_context": r"オイラーの公式を用いると、三角関数は指数関数で表現できる。",
+#         "math_result": ""
+#     }
 
-    print("\n=== テストA：文脈からの前提推論テスト ===")
-    result_a = math_graph.invoke(test_context_infer)
-    print(result_a["math_result"])
+#     print("\n=== テストA：文脈からの前提推論テスト ===")
+#     result_a = math_graph.invoke(test_context_infer)
+#     print(result_a["math_result"])
     
-    print("\n\n=== テストB：式Aから式Bへの明示的な行間補完テスト ===")
-    result_b = math_graph.invoke(test_explicit_jump)
-    print(result_b["math_result"])
+#     print("\n\n=== テストB：式Aから式Bへの明示的な行間補完テスト ===")
+#     result_b = math_graph.invoke(test_explicit_jump)
+#     print(result_b["math_result"])
