@@ -1,4 +1,4 @@
-import os
+import os, re
 import requests
 import urllib.parse
 from functools import lru_cache
@@ -14,7 +14,7 @@ load_dotenv()
 
 llm = ChatOpenAI(
     base_url=os.environ.get("LOCAL_OPENAI_BASE_URL", "http://127.0.0.1:1234/v1"),
-    api_key=os.environ.get("LOCAL_OPENAI_API_KEY", "dummy"),
+    api_key=os.environ.get("LOCAL_OPENAI_API_KEY", ""),
     model=os.environ.get("LOCAL_OPENAI_MODEL_NAME", "qwen3:14b"),
     temperature=0.2,
     # streaming=True 
@@ -103,8 +103,12 @@ def check_paper_availability_keyless(query_title: str, query_authors: str = ""):
 # State定義
 # ==========================================
 class CitationState(TypedDict):
+    intent: str
+    raw_text: Optional[str]
+    extracted_text: Optional[str]
     selected_citation: str
     current_context: str
+    references_dict: dict
     target_reference_text: str
     paper_info: dict
     relevance_explanation: str
@@ -112,24 +116,31 @@ class CitationState(TypedDict):
 # ==========================================
 # プロンプト定義
 # ==========================================
+# 🌟 変更: ギャップ分析と批判的読み取りを強調したプロンプト
 prompt_citation = ChatPromptTemplate.from_messages([
-    ("system", r"""あなたは学術論文の読解をサポートする専門エージェントです。
-ユーザーは論文の本文中で引用マークをクリックしました。
-提供された【引用元の文脈】と、システムが取得した【引用先論文の情報】（タイトルとアブストラクト）をもとに、「なぜ著者はここでこの論文を引用したのか」を簡潔に解説してください。
+    ("system", r"""あなたは学術論文の批判的読解（Critical Reading）をサポートする専門エージェントです。
+ユーザーは論文の本文中で引用されている文献について調査を依頼しました。
 
-【重要なフォーマット指示】
-1. アブストラクトの単純な和訳は不要です。現在の文脈において、引用先論文のどのような手法や結論が「根拠・前提」として使われているか（関連性）にフォーカスしてください。
-2. 初学者が直感的に理解できるよう、3〜4文程度で分かりやすく説明してください。
+提供された【現在読んでいる論文の文脈】と、【引用先論文の情報（タイトルとアブストラクト）】を比較し、以下の3つの観点から分析レポートを作成してください。
+
+【出力フォーマット】
+### 1. 引用先論文の概要
+（アブストラクトから読み取れる、元論文の主な主張や手法を2〜3文で簡潔に）
+
+### 2. 本論文での使われ方と対応関係
+（現在の文脈において、元論文のどの要素が「根拠・前提・比較対象」として使われているか。もし変数や用語の対応関係が推測できる場合はそれも記載）
+
+### 3. 🔍 ギャップ分析・批判的視点
+（ここが最も重要です。以下の点について考察してください）
+- 著者は元論文の主張をそのまま鵜呑みにしているか、それとも一部を批判・拡張しているか？
+- 元論文の前提条件（実験環境や制約など）が、現在の論文の文脈に無理なく適用できるか？（飛躍や過度の一般化がないか）
+- もしアブストラクトから読み取れる元論文の主張と、現在の論文での引用のされ方に「ズレ」や「都合の良い解釈」の可能性があれば指摘してください。
 
 【例外処理：アブストラクトが取得できなかった場合】
-もし提供されたアブストラクトが「要約データなし」や空欄であった場合、絶対に知ったかぶりをせず、以下の手順で回答を作成してください。
-・回答の冒頭に必ず「⚠️ **アブストラクトが取得できなかったため、タイトルと文脈からの推測を含みます:**」と明記してください。
-・その上で、引用元の文脈から「著者が何を根拠にしたくて、この位置で引用を行ったと考えられるか」を論理的に推論して解説してください。あなたの事前知識で論文を知っている場合も、あくまで推測として提示してください。
+アブストラクトが「要約データなし」の場合は、その旨を明記した上で、タイトルと文脈のみから「なぜここで引用されたと考えられるか」の推測のみを提供してください。
+また、回答の冒頭に必ず「⚠️ **アブストラクトが取得できなかったため、タイトルと文脈からの推測を含みます:**」と明記してください。
 """),
-    ("human", """【引用箇所】
-{selected_citation}
-
-【引用元の文脈】
+    ("human", """【現在読んでいる論文の文脈】
 {current_context}
 
 【引用先論文の情報】
@@ -139,23 +150,72 @@ prompt_citation = ChatPromptTemplate.from_messages([
 ])
 
 # ==========================================
+# OAステータス確認専用の軽量関数（main.py等から呼ばれる）
+# ==========================================
+def get_oa_status_from_text(raw_citation_text: str) -> dict:
+    print(f"🚦 [OA Check] テキスト抽出を開始: {raw_citation_text[:30]}...")
+    chain_extract = prompt_extraction | llm | parser
+    
+    try:
+        extracted = chain_extract.invoke({
+            "raw_citation_text": raw_citation_text,
+            "format_instructions": parser.get_format_instructions()
+        })
+        
+        # Webサイトの場合は即座に青信号を返す
+        if extracted.get("type") == "website":
+             return {"color": "blue", "status": "Web Article", "title": extracted.get("title", "")}
+        
+        # 論文の場合はAPIを叩いて調査
+        info = check_paper_availability_keyless(extracted.get("title", ""), extracted.get("authors", ""))
+        info["title"] = extracted.get("title", "") # UI表示用にタイトルを付与
+        return info
+        
+    except Exception as e:
+        print(f"⚠️ [OA Check] エラー発生: {e}")
+        return {"color": "gray", "status": "Error", "message": str(e)}
+
+# ==========================================
 # ノード処理
 # ==========================================
 def citation_agent_node(state: CitationState):
-    raw_text = state["target_reference_text"]
-    print(f"📚 Citation Agent起動: 生テキスト '{raw_text[:30]}...' を解析中...")
+    # 1. OCR結果（画像からの読み取り）、または生の選択テキストを取得
+    input_text = state.get("extracted_text") or state.get("raw_text") or state.get("selected_citation") or ""
+    refs_dict = state.get("references_dict", {})
+    
+    if state.get("extracted_text"):
+        original_context = state.get("current_context", "").strip()
+        state["current_context"] = f"【画像から抽出された正確な対象テキスト】\n{input_text}\n\n【ページ周辺の広い文脈】\n{original_context}"
+        print("🔍 OCR抽出テキストとページ文脈を合成")
+
+    target_reference_text = ""
+    
+    # 🌟 新機能: テキスト内から "[n]" という引用番号を正規表現で自動探索
+    found_refs = re.findall(r'\[\d+\]', input_text)
+    
+    if found_refs:
+        target_num = found_refs[0] # 最初に見つかった番号を採用
+        target_reference_text = refs_dict.get(target_num, "")
+        print(f"🔍 抽出テキストから引用番号 {target_num} を発見しました。")
+    
+    # 辞書から引けなかった場合は、入力されたテキスト自体が書誌情報だとみなす
+    if not target_reference_text:
+        print("⚠️ 辞書からの特定に失敗したため、テキストを直接解析します。")
+        target_reference_text = input_text
+
+    print(f"📚 Citation Agent起動: 生テキスト '{target_reference_text[:30]}...' を解析中...")
 
     # LLMによる構造化とゴミ取り
     chain_extract = prompt_extraction | llm | parser
     try:
         extracted_data = chain_extract.invoke({
-            "raw_citation_text": raw_text,
+            "raw_citation_text": target_reference_text, # 🌟 変更: 特定したテキストを渡す
             "format_instructions": parser.get_format_instructions()
         })
         print(f"✨ 抽出成功: {extracted_data['title']} (著者: {extracted_data['authors']}) [Type: {extracted_data['type']}]")
     except Exception as e:
         print(f"⚠️ 抽出失敗（フォールバック）: {e}")
-        extracted_data = {"title": raw_text, "authors": "", "type": "paper", "url": None}
+        extracted_data = {"title": state.get("raw_text"), "authors": "", "type": "paper", "url": None}
 
     paper_info = {}
     

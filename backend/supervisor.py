@@ -1,53 +1,68 @@
-from typing import TypedDict, Literal, List, Dict
+from typing import TypedDict, Literal, List, Dict, Optional
 from langgraph.graph import StateGraph, START, END
 from qa_agent import qa_agent_node
 from math_agent import math_agent_node
 from citation_agent import citation_agent_node
+from ocr_agent import ocr_agent_node
 
 # ==========================================
-# アプリ全体の統合State（データ構造）
+# アプリ全体の統合State（新生Paper Agentの心臓部）
 # ==========================================
 class AppState(TypedDict):
-    # --- ルーティング用フラグ ---
-    task_type: Literal["qa", "math", "citation"] 
+    # --- 🌟 新規: 共通の入力データ ---
+    intent: Literal["qa", "math", "citation"] # ユーザーの目的
+    raw_image: Optional[str]     # 切り抜き画像（base64）
+    raw_text: Optional[str]      # 選択テキスト
+    
+    # --- 🌟 新規: OCRエージェントが埋める中間データ ---
+    extracted_text: Optional[str] # 画像から抽出された綺麗なテキスト/数式/引用番号
     
     # --- 共通の文脈データ ---
     current_context: str
     paper_metadata: str
     chat_history: List[Dict[str, str]]
+    references_dict: dict
     
-    # --- QA用データ ---
+    # ========================================
+    # 以下、既存エージェントとの互換性維持用データ
+    # （各専門エージェントを改修した後に順次削っていきます）
+    # ========================================
     selected_text: str
     user_intent: str
     qa_answer: str
     dict_suggestions: str
     
-    # --- Math用データ ---
     selected_tex: str
-    selected_image: str
+    selected_image: str 
     action_type: str
     math_result: str
     
-    # --- Citation用データ ---
     selected_citation: str
     target_reference_text: str
     paper_info: dict
     relevance_explanation: str
 
 # ==========================================
-# ルーティング関数
+# 🧭 ルーティング関数 (Supervisor)
 # ==========================================
 def route_task(state: AppState) -> str:
-    task = state.get("task_type")
+    # 🌟 画像があって、かつOCRがまだ終わっていなければ、問答無用でOCRへ回送
+    if state.get("raw_image") and not state.get("extracted_text"):
+        print("🧭 [Supervisor] 未解析の画像を検知。 -> OCR Agent へ回送")
+        return "OCRNode"
     
-    if task == "qa":
+    # 画像がない、またはOCRが完了している場合は、目的（intent）に応じて専門ワーカーへ
+    intent = state.get("intent")
+    print(f"🧭 [Supervisor] Intent [{intent}] を確認。 -> 専門Agent へ回送")
+    
+    if intent == "qa":
         return "QANode"
-    elif task == "math":
+    elif intent == "math":
         return "MathNode"
-    elif task == "citation":
+    elif intent == "citation":
         return "CitationNode"
     else:
-        raise ValueError(f"不明なタスクタイプです: {task}")
+        raise ValueError(f"不明なタスクタイプです: {intent}")
 
 # ==========================================
 # グラフ構築
@@ -55,12 +70,26 @@ def route_task(state: AppState) -> str:
 builder = StateGraph(AppState)
 
 # ノードの登録
+builder.add_node("OCRNode", ocr_agent_node)
 builder.add_node("QANode", qa_agent_node)
 builder.add_node("MathNode", math_agent_node)
 builder.add_node("CitationNode", citation_agent_node)
 
+# STARTからの条件分岐
 builder.add_conditional_edges(
     START, 
+    route_task,
+    {
+        "OCRNode": "OCRNode",
+        "QANode": "QANode",
+        "MathNode": "MathNode",
+        "CitationNode": "CitationNode"
+    }
+)
+
+# 🌟 魔法のルーティング: OCRNodeが終わったら、もう一度 Supervisor(route_task) に戻して再評価する
+builder.add_conditional_edges(
+    "OCRNode",
     route_task,
     {
         "QANode": "QANode",
@@ -69,41 +98,9 @@ builder.add_conditional_edges(
     }
 )
 
+# 終端の定義
 builder.add_edge("QANode", END)
 builder.add_edge("MathNode", END)
 builder.add_edge("CitationNode", END)
 
 app_graph = builder.compile()
-
-if __name__ == "__main__":
-    print("=== 🚀 Supervisor ルーティングテスト ===")
-    
-    # パターン1: ユーザーがテキストを選択して「要約」ボタンを押した
-    print("\n[テスト1] UIからの入力: QAタスク")
-    ui_request_qa = {
-        "task_type": "qa", 
-        "user_intent": "要約",
-        "selected_text": "ミクロな世界では状況が異なる。",
-        "current_context": "..."
-    }
-    app_graph.invoke(ui_request_qa)
-    
-    # パターン2: ユーザーが数式をクリックした
-    print("\n[テスト2] UIからの入力: Mathタスク")
-    ui_request_math = {
-        "task_type": "math",
-        "action_type": "explain_step",
-        "selected_tex": "E = mc^2",
-        "current_context": "..."
-    }
-    app_graph.invoke(ui_request_math)
-    
-    # パターン3: ユーザーが引用番号をクリックした
-    print("\n[テスト3] UIからの入力: Citationタスク")
-    ui_request_citation = {
-        "task_type": "citation",
-        "selected_citation": "[3]",
-        "target_reference_text": "Attention Is All You Need",
-        "current_context": "..."
-    }
-    app_graph.invoke(ui_request_citation)

@@ -9,6 +9,9 @@ class PaperParser:
         self.full_text = ""
         self.toc = []
         self.references = {}
+
+        self.citation_pages = {} 
+        self.page_texts = {}
         
         # 初期化時に自動で全解析を走らせる
         self._parse_all()
@@ -20,6 +23,7 @@ class PaperParser:
         for page_num in range(len(self.doc)):
             page = self.doc[page_num]
             text = page.get_text()
+            self.page_texts[page_num + 1] = text 
             text_blocks.append(text)
             
             lines = text.split('\n')
@@ -87,6 +91,7 @@ class PaperParser:
             self.toc = list(toc_dict.values())
             
         self._extract_references()
+        self._map_citation_pages()
 
     def _extract_references(self):
         # 「参考文献」や「References」という文字以降を切り出す
@@ -103,6 +108,16 @@ class PaperParser:
                 ref_num = f"[{match[0]}]" # "[1]" の形にする
                 ref_text = match[1].strip().replace('\n', ' ') # 改行を取り除く
                 self.references[ref_num] = ref_text
+
+    def _map_citation_pages(self):
+        for ref_num in self.references.keys():
+            self.citation_pages[ref_num] = []
+            # 例: "[1]" を正規表現で安全に検索（\[1\] のようにエスケープする）
+            pattern = re.compile(re.escape(ref_num))
+            
+            for page_num, text in self.page_texts.items():
+                if pattern.search(text):
+                    self.citation_pages[ref_num].append(page_num)
 
     def get_context_around(self, search_text: str, window_size: int = 400) -> str:
         """指定したテキストの前後（window_size文字）を、ページを跨いで抽出する"""

@@ -1,5 +1,5 @@
 import json
-from typing import TypedDict, List, Dict
+from typing import TypedDict, List, Dict, Optional
 from langgraph.graph import StateGraph, START, END
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
@@ -12,19 +12,22 @@ load_dotenv()
 
 llm = ChatOpenAI(
     base_url=os.environ.get("LOCAL_OPENAI_BASE_URL", "http://127.0.0.1:1234/v1"),
-    api_key=os.environ.get("LOCAL_OPENAI_API_KEY", "dummy"),
+    api_key=os.environ.get("LOCAL_OPENAI_API_KEY", ""),
     model=os.environ.get("LOCAL_OPENAI_MODEL_NAME", "qwen3:14b"),
     temperature=0.2,
     # streaming=True 
 )
 
-# 1Stateの定義
+# Stateの定義
 class QAState(TypedDict):
+    intent: str
+    raw_text: Optional[str]
+    extracted_text: Optional[str]
     paper_metadata: str
     selected_text: str
     current_context: str
     chat_history: List[Dict[str, str]]
-    user_intent: str      # "explain"解説, "intent"意図, "example"具体例, "summarize"要約, "evidence"根拠 のいずれか
+    user_intent: str      
     qa_answer: str
     dict_suggestions: str
 
@@ -60,8 +63,11 @@ def format_history_to_messages(history_dicts, max_turns=5):
 # ノード処理
 # ==========================================
 def qa_agent_node(state: QAState):
-    intent_key = state.get("user_intent", "")
-    selected_text = state.get("selected_text", "")
+    # 互換性のため、新しい intent と古い user_intent の両方を見る
+    intent_key = state.get("user_intent") or state.get("intent") or ""
+    
+    # OCR結果を優先
+    selected_text = state.get("extracted_text") or state.get("raw_text") or state.get("selected_text") or ""
     
     # 自由入力か定型ボタンか判定
     if intent_key in INTENT_INSTRUCTIONS:

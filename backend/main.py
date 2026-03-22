@@ -9,6 +9,7 @@ import asyncio
 from pdf_parser import PaperParser
 from supervisor import app_graph
 from pdf_parser import PaperParser
+from citation_agent import get_oa_status_from_text
 
 # アプリ立ち上げ時にPDFを解析してメモリに保持(仮)
 print("⏳ PDFを解析中...")
@@ -41,6 +42,9 @@ class AgentRequest(BaseModel):
     payload: PayloadData
     chat_history: List[ChatMessage] = []
 
+class OARequest(BaseModel):
+    raw_citation: str
+
 app = FastAPI(title="Paper Agent Backend API")
 
 app.add_middleware(
@@ -54,11 +58,18 @@ app.add_middleware(
 # ==========================================
 # エンドポイント
 # ==========================================
+@app.post("/api/check_oa")
+async def check_oa_status(req: OARequest):
+    # 🌟 変更: Citation Agentのスキル（関数）を非同期で呼び出すだけ！
+    result = await asyncio.to_thread(get_oa_status_from_text, req.raw_citation)
+    return result
+
 @app.get("/api/pdf_info")
 def get_pdf_info():
     return {
         "toc": pdf_parser.toc,
-        "references": pdf_parser.references
+        "references": pdf_parser.references,
+        "citation_pages": getattr(pdf_parser, "citation_pages", {})
     }
 
 @app.post("/api/agent")
@@ -69,45 +80,29 @@ async def run_agent(request: AgentRequest):
         current_context = request.context.current_context
         target_reference = request.payload.target_reference_text
 
-        state = {
-            "task_type": request.task_type,
-            "current_context": current_context,
-            "paper_metadata": request.context.paper_metadata or "",
-            "selected_text": request.payload.selected_text or "",
-            "user_intent": request.payload.user_intent or "",
-            "selected_tex": request.payload.selected_tex or "",
-            "selected_image": request.payload.selected_image or "",
-            "action_type": request.payload.action_type or "",
-            "selected_citation": request.payload.selected_citation or "",
-            "target_reference_text": target_reference or "",
-            "chat_history": [{"role": msg.role, "content": msg.content} for msg in request.chat_history],
-        }
-
         yield f"data: {json.dumps({'status': 'info', 'message': '🧠 エージェントが推論中...'})}\n\n"
 
-        # QA/Mathタスク
+        # QA/Mathタスクの文脈再取得 (既存ロジック維持)
         if request.task_type in ["qa", "math"] and (request.payload.selected_text or request.payload.selected_image):
-            # ページ横断の完璧な文脈をバックエンドで取得し直す
-            backend_context = pdf_parser.get_context_around(request.payload.selected_text, window_size=400)
+            backend_context = pdf_parser.get_context_around(request.payload.selected_text or "", window_size=400)
             if backend_context and backend_context != request.payload.selected_text:
                 current_context = backend_context
                 print("🔍 バックエンドでページ横断の文脈を再抽出しました。")
 
-        # Citationタスク
-        elif request.task_type == "citation" and request.payload.selected_citation:
-            # "[4]" などの引用番号から、パース済みの参考文献リストを引く
-            ref_text = pdf_parser.references.get(request.payload.selected_citation)
-            if ref_text:
-                target_reference = ref_text
-                print(f"📚 引用元を特定しました: {target_reference[:40]}...")
-            else:
-                print("⚠️ 指定された引用番号が見つかりませんでした。")
-
-        # 強化されたデータを使って LangGraph に渡す State を構築
+        # 🌟 変更: 新生 Paper Agent 用の State を構築
         state = {
-            "task_type": request.task_type,
+            # --- 新アーキテクチャ用データ ---
+            "intent": request.task_type,
+            "raw_image": request.payload.selected_image or None,
+            "raw_text": request.payload.selected_text or None,
+            "extracted_text": None, # ここは空っぽで渡す（OCR Agentに任せる）
+            
             "current_context": current_context,
             "paper_metadata": request.context.paper_metadata or "",
+            "chat_history": [{"role": msg.role, "content": msg.content} for msg in request.chat_history],
+            "references_dict": pdf_parser.references,
+            
+            # --- 既存エージェントとの後方互換用データ ---
             "selected_text": request.payload.selected_text or "",
             "user_intent": request.payload.user_intent or "",
             "selected_tex": request.payload.selected_tex or "",
@@ -115,9 +110,9 @@ async def run_agent(request: AgentRequest):
             "action_type": request.payload.action_type or "",
             "selected_citation": request.payload.selected_citation or "",
             "target_reference_text": target_reference or "",
-            "chat_history": [{"role": msg.role, "content": msg.content} for msg in request.chat_history],
         }
         
+        # グラフ（Supervisor）の実行
         graph_result = await asyncio.to_thread(app_graph.invoke, state)
         
         # 出力振り分けとストリーミング(0.01s)
@@ -134,11 +129,7 @@ async def run_agent(request: AgentRequest):
                 yield f"data: {json.dumps({'chunk': char, 'task_type': 'math'})}\n\n"
                 
         elif request.task_type == "citation":
-            paper_info = graph_result.get("paper_info", {})
             explanation = graph_result.get("relevance_explanation", "エラー: 解説が生成されませんでした。")
-            
-            # 論文データを先に送る
-            yield f"data: {json.dumps({'paper_info': paper_info, 'task_type': 'citation'})}\n\n"
             
             for char in explanation:
                 await asyncio.sleep(0.01)

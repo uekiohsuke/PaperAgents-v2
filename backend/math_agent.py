@@ -1,6 +1,6 @@
 import os
 import json
-from typing import TypedDict, Optional
+from typing import TypedDict, Optional, Any
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, START, END
 from langchain_core.prompts import ChatPromptTemplate
@@ -13,15 +13,17 @@ load_dotenv()
 
 llm = ChatOpenAI(
     base_url=os.environ.get("LOCAL_OPENAI_BASE_URL", "http://127.0.0.1:1234/v1"),
-    api_key=os.environ.get("LOCAL_OPENAI_API_KEY", "dummy"),
+    api_key=os.environ.get("LOCAL_OPENAI_API_KEY", ""),
     model=os.environ.get("LOCAL_OPENAI_MODEL_NAME", "qwen3:14b"),
     temperature=0.2,
     # streaming=True 
 )
 
 class MathState(TypedDict):
-    selected_tex: str
-    selected_image: str
+    intent: str
+    raw_image: Optional[str]
+    raw_text: Optional[str]
+    extracted_text: Optional[str]
     action_type: str
     current_context: str
     math_result: str
@@ -119,23 +121,17 @@ $$ x e^x - e^x $$
 # ==========================================
 def math_agent_node(state: MathState):
     action_type = state.get("action_type", "explain_step")
-    image_url = state.get("selected_image", "")
-    selected_tex = state.get("selected_tex", "")
+    
+    # OCRエージェントからの抽出結果（なければ生テキスト）を優先して取得
+    clean_tex = state.get("extracted_text") or state.get("raw_text") or state.get("selected_tex") or ""
     
     print(f"🧮 Math Agent起動中... (モード: {action_type})")
+    print(f"  => 対象テキスト: {clean_tex[:30]}...")
 
-    print("  => Step 1: 数式の解析（OCR/構造化）を開始...")
-    
-    if image_url:
-        print("OCRを実行します...")
-        target_content = [
-            {"type": "text", "text": f"以下の画像に含まれる「文章」と「数式」をすべて正確に読み取り、マークダウン形式で抽出してください。数式部分は必ずLaTeX形式にしてください。\nまた、登場する変数の意味も抽出してください。\n\n【重要】JSONの構文エラーを防ぐため、LaTeXのコマンド（例: \\frac, \\partial）のバックスラッシュは必ず2つ（例: \\\\frac, \\\\partial）にエスケープして出力してください。\n\n{parser.get_format_instructions()}"},
-            {"type": "image_url", "image_url": {"url": image_url}}
-        ]
-    else:
-        target_content = [
-            {"type": "text", "text": f"以下のLaTeX数式に含まれる変数の意味を抽出して整理してください。\n\n【数式】\n{selected_tex}\n\n{parser.get_format_instructions()}"}
-        ]
+    print("  => Step 1: 変数情報の抽出（純粋な言語タスク）を開始...")
+    target_content = [
+        {"type": "text", "text": f"以下のテキスト・数式に含まれる変数の意味を抽出して整理してください。\n\n【対象】\n{clean_tex}\n\n{parser.get_format_instructions()}"}
+    ]
 
     messages_step1 = [
         SystemMessage(content="あなたは数式処理と物理モデルの解析に長けたAIです。"),
@@ -145,13 +141,10 @@ def math_agent_node(state: MathState):
     try:
         response_step1 = llm.invoke(messages_step1)
         math_data = parser.invoke(response_step1)
-        clean_tex = math_data["extracted_content"]
         variables_info = json.dumps(math_data["variables"], ensure_ascii=False, indent=2)
-        print(f"  ✨ OCR成功: {clean_tex}")
+        print(f"  ✨ 変数抽出成功")
     except Exception as e:
-        print(f"  ⚠️ OCR失敗（フォールバック）: {e}")
-        # 失敗した場合は元のテキストをそのまま使う
-        clean_tex = selected_tex if selected_tex else "（画像読み取り失敗）"
+        print(f"  ⚠️ 変数抽出失敗（フォールバック）: {e}")
         variables_info = "抽出なし"
 
     print("  => Step 2: 導出・解説の生成を開始...")
@@ -166,7 +159,7 @@ def math_agent_node(state: MathState):
     })
 
     print("Math Agent 作業終了")
-    
+
     return {"math_result": response_step2.content}
 
 # グラフ構築
