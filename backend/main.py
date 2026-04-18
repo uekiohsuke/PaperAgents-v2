@@ -10,11 +10,12 @@ from pdf_parser import PaperParser
 from supervisor import app_graph
 from pdf_parser import PaperParser
 from citation_agent import get_oa_status_from_text
+from fastapi import UploadFile, File
+import os
+import shutil
 
-# アプリ立ち上げ時にPDFを解析してメモリに保持(仮)
-print("⏳ PDFを解析中...")
-pdf_parser = PaperParser("sample.pdf") 
-print("✅ PDF解析完了！サーバーを立ち上げます。")
+pdf_parser = None 
+print("✅ サーバーを立ち上げました。PDFのアップロードを待機しています。")
 
 # ==========================================
 # データコントラクト定義
@@ -37,13 +38,16 @@ class ChatMessage(BaseModel):
     content: str
 
 class AgentRequest(BaseModel):
-    task_type: Literal["qa", "math", "citation"]
+    task_type: Literal["qa", "math", "citation", "chart"]
     context: ContextData
     payload: PayloadData
     chat_history: List[ChatMessage] = []
 
 class OARequest(BaseModel):
     raw_citation: str
+
+class ThreadSummaryRequest(BaseModel):
+    messages: list[dict]
 
 app = FastAPI(title="Paper Agent Backend API")
 
@@ -58,6 +62,52 @@ app.add_middleware(
 # ==========================================
 # エンドポイント
 # ==========================================
+@app.post("/api/summarize_thread")
+async def summarize_thread(req: ThreadSummaryRequest):
+    # 🌟 変更: LLMを直接叩かず、Supervisorに状態(State)を投げる
+    state = {
+        "intent": "thread_summary",
+        "user_intent": "thread_summary", # QA Agentでの分岐用
+        "chat_history": req.messages,
+        
+        # エラー回避のためのダミーデータ（既存の Graph 構造に合わせる）
+        "raw_text": "", "extracted_text": "", "current_context": "", "paper_metadata": "",
+        "selected_text": "", "selected_tex": "", "selected_image": "", "action_type": "",
+        "selected_citation": "", "target_reference_text": "", "references_dict": {}
+    }
+    
+    try:
+        # Supervisorを通してQAAgentを実行（非同期）
+        result = await asyncio.to_thread(app_graph.invoke, state)
+        
+        # QAAgentがセットしてくれた qa_answer を取り出して返す
+        return {"summary": result.get("qa_answer", "要約結果が空です。")}
+    except Exception as e:
+        return {"summary": f"要約エラー: {str(e)}"}
+
+@app.post("/api/upload")
+async def upload_pdf(file: UploadFile = File(...)):
+    global pdf_parser
+    
+    # uploadsディレクトリを作って一時保存
+    os.makedirs("uploads", exist_ok=True)
+    file_path = f"uploads/{file.filename}"
+    
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+        
+    print(f"⏳ {file.filename} を解析中...")
+    pdf_parser = PaperParser(file_path) # ここで自作パーサーが走る
+    print("✅ 解析完了！")
+    
+    # 解析結果をフロントにそのまま返す
+    return {
+        "message": "success",
+        "toc": getattr(pdf_parser, "toc", []),
+        "references": getattr(pdf_parser, "references", {}),
+        "citation_pages": getattr(pdf_parser, "citation_pages", {})
+    }
+
 @app.post("/api/check_oa")
 async def check_oa_status(req: OARequest):
     # 🌟 変更: Citation Agentのスキル（関数）を非同期で呼び出すだけ！
@@ -66,10 +116,12 @@ async def check_oa_status(req: OARequest):
 
 @app.get("/api/pdf_info")
 def get_pdf_info():
+    if not pdf_parser:
+        return {"toc": [], "references": {}, "citation_pages": {}}
     return {
         "toc": pdf_parser.toc,
         "references": pdf_parser.references,
-        "citation_pages": getattr(pdf_parser, "citation_pages", {})
+        "citation_pages": getattr(pdf_parser, "citation_pages", {}) 
     }
 
 @app.post("/api/agent")
@@ -82,27 +134,30 @@ async def run_agent(request: AgentRequest):
 
         yield f"data: {json.dumps({'status': 'info', 'message': '🧠 エージェントが推論中...'})}\n\n"
 
-        # QA/Mathタスクの文脈再取得 (既存ロジック維持)
-        if request.task_type in ["qa", "math"] and (request.payload.selected_text or request.payload.selected_image):
-            backend_context = pdf_parser.get_context_around(request.payload.selected_text or "", window_size=400)
-            if backend_context and backend_context != request.payload.selected_text:
-                current_context = backend_context
-                print("🔍 バックエンドでページ横断の文脈を再抽出しました。")
+        # 🌟 修正1: pdf_parser が None じゃない時だけ get_context_around を実行する
+        if request.task_type in ["qa", "math", "chart"] and (request.payload.selected_text or request.payload.selected_image):
+            if pdf_parser is not None: # ← この if 文を追加！
+                backend_context = pdf_parser.get_context_around(request.payload.selected_text or "", window_size=400)
+                if backend_context and backend_context != request.payload.selected_text:
+                    current_context = backend_context
+                    print("🔍 バックエンドでページ横断の文脈を再抽出しました。")
+            else:
+                print("⚠️ pdf_parserが未初期化のため、フロントエンドの文脈をそのまま使用します。")
 
-        # 🌟 変更: 新生 Paper Agent 用の State を構築
+        # State を構築
         state = {
-            # --- 新アーキテクチャ用データ ---
             "intent": request.task_type,
             "raw_image": request.payload.selected_image or None,
             "raw_text": request.payload.selected_text or None,
-            "extracted_text": None, # ここは空っぽで渡す（OCR Agentに任せる）
+            "extracted_text": None, 
             
             "current_context": current_context,
             "paper_metadata": request.context.paper_metadata or "",
             "chat_history": [{"role": msg.role, "content": msg.content} for msg in request.chat_history],
-            "references_dict": pdf_parser.references,
             
-            # --- 既存エージェントとの後方互換用データ ---
+            # 🌟 修正2: pdf_parser が None の時は空の辞書を渡すように変更！
+            "references_dict": pdf_parser.references if pdf_parser is not None else {},
+            
             "selected_text": request.payload.selected_text or "",
             "user_intent": request.payload.user_intent or "",
             "selected_tex": request.payload.selected_tex or "",
@@ -115,7 +170,7 @@ async def run_agent(request: AgentRequest):
         # グラフ（Supervisor）の実行
         graph_result = await asyncio.to_thread(app_graph.invoke, state)
         
-        # 出力振り分けとストリーミング(0.01s)
+        # 🌟 修正3: 出力振り分け部分を正しく Chart に対応させる
         if request.task_type == "qa":
             answer = graph_result.get("qa_answer", "エラー: 回答が生成されませんでした。")
             for char in answer:
@@ -128,14 +183,21 @@ async def run_agent(request: AgentRequest):
                 await asyncio.sleep(0.01)
                 yield f"data: {json.dumps({'chunk': char, 'task_type': 'math'})}\n\n"
                 
+        elif request.task_type == "chart": # 📊 Chart用の出力処理を追加
+            # ChartAgent は qa_answer キーに結果を入れているのでそれを取り出す
+            answer = graph_result.get("qa_answer", "エラー: 解説が生成されませんでした。")
+            for char in answer:
+                await asyncio.sleep(0.01)
+                yield f"data: {json.dumps({'chunk': char, 'task_type': 'chart'})}\n\n"
+                
         elif request.task_type == "citation":
             explanation = graph_result.get("relevance_explanation", "エラー: 解説が生成されませんでした。")
-            
             for char in explanation:
                 await asyncio.sleep(0.01)
                 yield f"data: {json.dumps({'chunk': char, 'task_type': 'citation'})}\n\n"
 
-        yield f"data: {json.dumps({'done': True})}\n\n"
+        dict_data = graph_result.get("dict_suggestions", "{}")
+        yield f"data: {json.dumps({'done': True, 'dict_suggestions': dict_data})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

@@ -100,6 +100,84 @@ def check_paper_availability_keyless(query_title: str, query_authors: str = ""):
         return generate_fallback("gray", query_title, "通信タイムアウト")
 
 # ==========================================
+# ネットワークグラフ用 APIツール (Semantic Scholar)
+# ==========================================
+def fetch_citation_network(query_title: str, max_nodes: int = 15):
+    """
+    指定された論文を中心に、引用（References）と被引用（Citations）の
+    ネットワークデータを取得し、フロントエンド(D3.js)用の nodes/links 形式で返す。
+    """
+    print(f"🌐 [Network] Semantic Scholar APIで '{query_title[:30]}...' のネットワークを構築中...")
+    
+    # Semantic Scholar API (検索と同時に引用・被引用データを取得)
+    # 取得フィールド: ID, タイトル, 年, 被引用数, 引用リスト(title, id), 被引用リスト(title, id)
+    url = f"https://api.semanticscholar.org/graph/v1/paper/search?query={urllib.parse.quote(query_title)}&limit=1&fields=paperId,title,year,citationCount,references.paperId,references.title,citations.paperId,citations.title"
+    
+    try:
+        print(url)
+        response = requests.get(url, timeout=15)
+        if response.status_code != 200 or not response.json().get("data"):
+            print("⚠️ Semantic Scholarで論文が見つかりませんでした。")
+            return {"nodes": [], "links": []}
+            
+        target_paper = response.json()["data"][0]
+        center_id = target_paper.get("paperId", "center_node")
+        
+        # グラフデータの初期化
+        nodes = []
+        links = []
+        seen_ids = set()
+        
+        # 中心ノード（今読んでいる論文）を追加
+        nodes.append({
+            "id": center_id,
+            "title": target_paper.get("title", "Unknown Title"),
+            "group": "Center", # グループ分け用
+            "citations": target_paper.get("citationCount", 10),
+            "year": target_paper.get("year", "")
+        })
+        seen_ids.add(center_id)
+        
+        # 1. References（この論文が引用している過去の文献）の処理
+        references = target_paper.get("references", [])
+        for ref in references[:max_nodes // 2]: # 表示数を制限
+            ref_id = ref.get("paperId")
+            if not ref_id or ref_id in seen_ids: continue
+            
+            nodes.append({
+                "id": ref_id,
+                "title": ref.get("title", "Unknown Title"),
+                "group": "Reference",
+                "citations": 5 # 簡易的なデフォルト値
+            })
+            # 中心ノードからReferenceへの矢印
+            links.append({"source": center_id, "target": ref_id})
+            seen_ids.add(ref_id)
+            
+        # 2. Citations（この論文を引用している未来の文献）の処理
+        citations = target_paper.get("citations", [])
+        for cit in citations[:max_nodes // 2]:
+            cit_id = cit.get("paperId")
+            if not cit_id or cit_id in seen_ids: continue
+            
+            nodes.append({
+                "id": cit_id,
+                "title": cit.get("title", "Unknown Title"),
+                "group": "Citation",
+                "citations": 5
+            })
+            # Citationから中心ノードへの矢印
+            links.append({"source": cit_id, "target": center_id})
+            seen_ids.add(cit_id)
+            
+        print(f"✅ ネットワーク構築完了: {len(nodes)}ノード, {len(links)}リンク")
+        return {"nodes": nodes, "links": links}
+        
+    except Exception as e:
+        print(f"⚠️ ネットワーク取得エラー: {e}")
+        return {"nodes": [], "links": []}
+
+# ==========================================
 # State定義
 # ==========================================
 class CitationState(TypedDict):
@@ -164,7 +242,12 @@ def get_oa_status_from_text(raw_citation_text: str) -> dict:
         
         # Webサイトの場合は即座に青信号を返す
         if extracted.get("type") == "website":
-             return {"color": "blue", "status": "Web Article", "title": extracted.get("title", "")}
+             return {
+                 "color": "blue", 
+                 "status": "Web Article", 
+                 "title": extracted.get("title", ""),
+                 "url": extracted.get("url") # ← これを追加！
+             }
         
         # 論文の場合はAPIを叩いて調査
         info = check_paper_availability_keyless(extracted.get("title", ""), extracted.get("authors", ""))
@@ -287,29 +370,41 @@ if __name__ == "__main__":
         "relevance_explanation": ""
     }
 
-    print("\n\n=== 🧪 テストA: 学術論文の抽出と検索 ===")
-    result_paper = citation_graph.invoke(test_state_paper)
+    # print("\n\n=== 🧪 テストA: 学術論文の抽出と検索 ===")
+    # result_paper = citation_graph.invoke(test_state_paper)
     
-    print("\n■ 【システム用】抽出・取得された書誌データ")
-    print(f"ステータス: {result_paper['paper_info'].get('color', 'gray').upper()} ({result_paper['paper_info'].get('status', 'Unknown')})")
-    print(f"抽出タイトル: {result_paper['paper_info'].get('title')}")
-    print(f"抽出著者: {result_paper['paper_info'].get('authors')}")
-    print(f"直接PDF URL: {result_paper['paper_info'].get('url')}")
-    if result_paper['paper_info'].get('scholar_url'):
-        print(f"Scholar URL: {result_paper['paper_info'].get('scholar_url')}")
+    # print("\n■ 【システム用】抽出・取得された書誌データ")
+    # print(f"ステータス: {result_paper['paper_info'].get('color', 'gray').upper()} ({result_paper['paper_info'].get('status', 'Unknown')})")
+    # print(f"抽出タイトル: {result_paper['paper_info'].get('title')}")
+    # print(f"抽出著者: {result_paper['paper_info'].get('authors')}")
+    # print(f"直接PDF URL: {result_paper['paper_info'].get('url')}")
+    # if result_paper['paper_info'].get('scholar_url'):
+    #     print(f"Scholar URL: {result_paper['paper_info'].get('scholar_url')}")
     
-    print("\n■ 【ユーザー表示用】関連性の解説")
-    print(result_paper['relevance_explanation'])
+    # print("\n■ 【ユーザー表示用】関連性の解説")
+    # print(result_paper['relevance_explanation'])
 
 
-    print("\n\n=== 🧪 テストB: Webサイトの自動判定 ===")
-    result_web = citation_graph.invoke(test_state_web)
+    # print("\n\n=== 🧪 テストB: Webサイトの自動判定 ===")
+    # result_web = citation_graph.invoke(test_state_web)
     
-    print("\n■ 【システム用】抽出・取得された書誌データ")
-    print(f"ステータス: {result_web['paper_info'].get('color', 'gray').upper()} ({result_web['paper_info'].get('status', 'Unknown')})")
-    print(f"抽出タイトル: {result_web['paper_info'].get('title')}")
-    print(f"抽出著者: {result_web['paper_info'].get('authors')}")
-    print(f"直接Web URL: {result_web['paper_info'].get('url')}")
+    # print("\n■ 【システム用】抽出・取得された書誌データ")
+    # print(f"ステータス: {result_web['paper_info'].get('color', 'gray').upper()} ({result_web['paper_info'].get('status', 'Unknown')})")
+    # print(f"抽出タイトル: {result_web['paper_info'].get('title')}")
+    # print(f"抽出著者: {result_web['paper_info'].get('authors')}")
+    # print(f"直接Web URL: {result_web['paper_info'].get('url')}")
     
-    print("\n■ 【ユーザー表示用】関連性の解説")
-    print(result_web['relevance_explanation'])
+    # print("\n■ 【ユーザー表示用】関連性の解説")
+    # print(result_web['relevance_explanation'])
+
+    # print("\n\n=== 🧪 テストC: 引用ネットワークの構築テスト ===")
+    # # アインシュタインの相対性理論の論文タイトルでネットワークテスト
+    # network_data = fetch_citation_network("Zur Elektrodynamik bewegter Körper")
+    
+    # print(f"\n■ 【システム用】生成されたD3.js用グラフデータ (Nodes: {len(network_data['nodes'])})")
+    # for node in network_data['nodes'][:5]: # 長いので5件だけ表示
+    #     print(f"  - [{node['group']}] {node['title'][:50]}...")
+        
+    # print(f"\n■ 【システム用】生成されたエッジ/リンク (Links: {len(network_data['links'])})")
+    # for link in network_data['links'][:5]:
+    #     print(f"  - {link['source'][:8]}... -> {link['target'][:8]}...")
