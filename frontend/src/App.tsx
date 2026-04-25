@@ -24,7 +24,7 @@ const pdfOptions = {
 type Message = {
   id: string;
   role: "user" | "ai";
-  taskType?: "qa" | "math" | "citation" | "chart";
+  taskType?: "qa" | "math" | "citation" | "chart" | "code";
   content: string; // ユーザーの質問や、AIの回答テキスト
   sourceText?: string; // 参照したテキスト（チップ表示用）
   sourceImage?: string; // 参照した画像（チップ表示用）
@@ -136,6 +136,16 @@ function App() {
 
   const [vocabList, setVocabList] = useState<TranslationVocab[]>([]);
   const [translationPopup, setTranslationPopup] = useState<{ text: string; pos: { x: number; y: number } } | null>(null);
+
+const [codePopup, setCodePopup] = useState<{ 
+    text: string; 
+    code: string; 
+    threadId: string;
+    previewImage?: string | null;
+    isPreviewLoading?: boolean;
+    previewError?: string | null;
+  } | null>(null);
+  const [codeFeedback, setCodeFeedback] = useState("");
 
   const [isAddingToc, setIsAddingToc] = useState(false);
   const [newTocTitle, setNewTocTitle] = useState("");
@@ -914,7 +924,7 @@ async function onDocumentLoadSuccess(pdf: any) {
   };
 
   // フローティングメニューからの実行をハンドリングする関数
-  const handleMenuAction = (taskType: "qa" | "math" | "citation" | "chart", actionStr: string) => {
+  const handleMenuAction = (taskType: "qa" | "math" | "citation" | "chart" | "code", actionStr: string) => {
     let targetId = selectedTargetThread;
 
     if (targetId === "new") {
@@ -967,7 +977,7 @@ async function onDocumentLoadSuccess(pdf: any) {
     }
   };
 
-  const askAgent = async (taskType: "qa" | "math" | "citation" | "chart",targetThreadId: string, subOption?: string, customText?: string, pos?: {x: number, y: number} | null) => {
+  const askAgent = async (taskType: "qa" | "math" | "citation" | "chart" | "code",targetThreadId: string, subOption?: string, customText?: string, pos?: {x: number, y: number} | null) => {
     // 選択テキスト、画像、自由入力のいずれかが無いと発火しない
     if (!selectedText && !croppedImage && !customText) return; 
     setIsLoading(true);
@@ -1085,6 +1095,25 @@ async function onDocumentLoadSuccess(pdf: any) {
                   }
                   
                   // 既存のthreads状態はそのまま返す
+                  return prevThreads;
+                });
+              }
+              else if (taskType === "code") {
+                setThreads(prevThreads => {
+                  const currentThread = prevThreads.find(t => t.id === targetThreadId);
+                  const latestAiMsg = currentThread?.messages.find(m => m.id === aiMsgId);
+                  
+                  if (latestAiMsg) {
+                    // マークダウンのコードブロックから中身だけを抽出する正規表現
+                    const codeMatch = latestAiMsg.content.match(/```[a-zA-Z]*\s*\n([\s\S]*?)```/);
+                    if (codeMatch && codeMatch[1]) {
+                      setCodePopup({ 
+                        text: "シミュレーションコードが生成されました", 
+                        code: codeMatch[1].trim(),
+                        threadId: targetThreadId
+                      });
+                    }
+                  }
                   return prevThreads;
                 });
               }
@@ -1479,6 +1508,25 @@ async function onDocumentLoadSuccess(pdf: any) {
                                 <div style={{ color: "var(--text-main)", fontSize: "0.95em", lineHeight: "1.6", overflowX: "auto", maxWidth: "100%" }}>
                                   <ReactMarkdown remarkPlugins={[remarkBreaks, remarkMath]} rehypePlugins={[rehypeKatex]}>{msg.content}</ReactMarkdown>
                                 </div>
+                                {msg.taskType === "code" && msg.content.includes("```") && (
+                                  <button 
+                                    onClick={() => {
+                                      const match = msg.content.match(/```[a-zA-Z]*\s*\n([\s\S]*?)```/);
+                                      // ここで threadId もセットする
+                                      if (match) setCodePopup({ 
+                                        text: "履歴からコードを開きました", 
+                                        code: match[1].trim(),
+                                        threadId: thread.id 
+                                      });
+                                    }}
+                                    style={{ marginTop: "12px", width: "100%", padding: "8px", background: "rgba(25, 118, 210, 0.1)", color: "#1976d2", border: "1px solid rgba(25, 118, 210, 0.3)", borderRadius: "4px", fontWeight: "bold", cursor: "pointer", display: "flex", justifyContent: "center", alignItems: "center", gap: "6px", transition: "all 0.2s" }}
+                                    onMouseEnter={(e) => e.currentTarget.style.background = "rgba(25, 118, 210, 0.2)"}
+                                    onMouseLeave={(e) => e.currentTarget.style.background = "rgba(25, 118, 210, 0.1)"}
+                                    
+                                  >
+                                    💻 コードをポップアップで拡大表示
+                                  </button>
+                                )}
                               </div>
                             </div>                        
                           ))
@@ -1529,6 +1577,7 @@ async function onDocumentLoadSuccess(pdf: any) {
                       <button onClick={() => setMenuCategory("math")} style={{ width: "100%", textAlign: "left", padding: "8px 10px", background: "transparent", color: "var(--text-main)", border: "none", borderRadius: "var(--radius-sm)", cursor: "pointer", fontSize: "0.9em", fontWeight: "500", display: "flex", alignItems: "center", gap: "10px", transition: "background 0.2s" }} onMouseEnter={(e) => e.currentTarget.style.background = "var(--bg-hover)"} onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}><span style={{ fontSize: "1.2em" }}>📐</span> 数式を解析 <span style={{ marginLeft: "auto", color: "var(--text-muted)", fontSize: "0.8em" }}>▶</span></button>
                       <button onClick={() => setMenuCategory("chart")} style={{ width: "100%", textAlign: "left", padding: "8px 10px", background: "transparent", color: "var(--text-main)", border: "none", borderRadius: "var(--radius-sm)", cursor: "pointer", fontSize: "0.9em", fontWeight: "500", display: "flex", alignItems: "center", gap: "10px", transition: "background 0.2s" }} onMouseEnter={(e) => e.currentTarget.style.background = "var(--bg-hover)"} onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}><span style={{ fontSize: "1.2em" }}>📊</span> 図表・グラフを解析 <span style={{ marginLeft: "auto", color: "var(--text-muted)", fontSize: "0.8em" }}>▶</span></button>
                       <button onClick={() => handleMenuAction("citation", "citation")} style={{ width: "100%", textAlign: "left", padding: "8px 10px", background: "transparent", color: "var(--text-main)", border: "none", borderRadius: "var(--radius-sm)", cursor: "pointer", fontSize: "0.9em", fontWeight: "500", display: "flex", alignItems: "center", gap: "10px", transition: "background 0.2s" }} onMouseEnter={(e) => e.currentTarget.style.background = "var(--bg-hover)"} onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}><span style={{ fontSize: "1.2em" }}>📚</span> 引用文献を調査</button>
+                      <button onClick={() => handleMenuAction("code", "simulation")} style={{ width: "100%", textAlign: "left", padding: "8px 10px", background: "transparent", color: "var(--text-main)", border: "none", borderRadius: "var(--radius-sm)", cursor: "pointer", fontSize: "0.9em", fontWeight: "500", display: "flex", alignItems: "center", gap: "10px", transition: "background 0.2s" }} onMouseEnter={(e) => e.currentTarget.style.background = "var(--bg-hover)"} onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}><span style={{ fontSize: "1.2em" }}>🚀</span> シミュレーション生成</button>
                     </>
                   )}
                   {menuCategory === "qa" && (
@@ -1582,7 +1631,139 @@ async function onDocumentLoadSuccess(pdf: any) {
                 </div>
               </div>
             )}
-            
+            {codePopup && (
+              <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.6)", zIndex: 2000, display: "flex", justifyContent: "center", alignItems: "center", backdropFilter: "blur(2px)" }} onClick={() => setCodePopup(null)}>
+                <div style={{ background: "var(--bg-panel)", width: "750px", maxWidth: "90vw", borderRadius: "var(--radius-lg)", boxShadow: "0 20px 40px rgba(0,0,0,0.4)", display: "flex", flexDirection: "column", overflow: "hidden", border: "1px solid var(--border-light)" }} onClick={(e) => e.stopPropagation()}>
+                  
+                  {/* ヘッダー */}
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 20px", background: "#1e1e1e", borderBottom: "1px solid #333" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                      <span style={{ fontSize: "1.2em" }}>🐍</span>
+                      <span style={{ fontWeight: "bold", color: "#d4d4d4", fontFamily: "monospace", letterSpacing: "1px" }}>Generated_Simulation.py</span>
+                    </div>
+                    <button onClick={() => setCodePopup(null)} style={{ background: "transparent", border: "none", cursor: "pointer", fontSize: "1.2em", color: "#858585", transition: "color 0.2s" }} onMouseEnter={(e) => e.currentTarget.style.color = "#fff"} onMouseLeave={(e) => e.currentTarget.style.color = "#858585"}>✕</button>
+                  </div>
+                  
+                  {/* 🌟 修正: コード表示＆プレビューエリア */}
+                  <div style={{ display: "flex", background: "#1e1e1e", borderBottom: "1px solid #333", height: "450px" }}>
+                    
+                    {/* 左側：コードエディタ */}
+                    <div style={{ flex: codePopup.previewImage || codePopup.previewError ? "1" : "2", padding: "20px", display: "flex", flexDirection: "column", borderRight: (codePopup.previewImage || codePopup.previewError) ? "1px solid #333" : "none", transition: "all 0.3s" }}>
+                      <textarea 
+                        readOnly 
+                        value={codePopup.code} 
+                        style={{ width: "100%", height: "100%", background: "transparent", color: "#9cdcfe", border: "none", outline: "none", fontFamily: "'Fira Code', Consolas, monospace", fontSize: "0.95em", resize: "none", lineHeight: "1.6" }} 
+                      />
+                    </div>
+
+                    {/* 右側：プレビュー結果エリア（画像またはエラーがあれば表示） */}
+                    {(codePopup.previewImage || codePopup.previewError || codePopup.isPreviewLoading) && (
+                      <div style={{ flex: "1", padding: "20px", display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", background: "#181818", overflow: "auto", position: "relative" }}>
+                        <button onClick={() => setCodePopup(p => p ? { ...p, previewImage: null, previewError: null } : null)} style={{ position: "absolute", top: "10px", right: "10px", background: "rgba(255,255,255,0.1)", border: "none", color: "#ccc", borderRadius: "4px", padding: "2px 8px", cursor: "pointer", fontSize: "0.8em" }}>閉じる</button>
+                        
+                        {codePopup.isPreviewLoading ? (
+                          <div style={{ color: "#858585", display: "flex", flexDirection: "column", alignItems: "center", gap: "10px" }}>
+                            <span style={{ fontSize: "2em" }}>⚙️</span>
+                            <span>バックエンドで実行中...</span>
+                          </div>
+                        ) : codePopup.previewError ? (
+                          <div style={{ color: "#ef4444", fontSize: "0.85em", background: "rgba(239, 68, 68, 0.1)", padding: "12px", borderRadius: "6px", width: "100%", whiteSpace: "pre-wrap", overflowX: "auto", fontFamily: "monospace" }}>
+                            <div style={{ fontWeight: "bold", marginBottom: "4px" }}>実行エラー:</div>
+                            {codePopup.previewError}
+                          </div>
+                        ) : codePopup.previewImage ? (
+                          <img src={codePopup.previewImage} alt="Simulation Preview" style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", background: "white", borderRadius: "4px" }} />
+                        ) : null}
+                      </div>
+                    )}
+                  </div>
+                  
+                  {/* フッター操作＆デバッグリクエストエリア */}
+                  <div style={{ padding: "16px 20px", display: "flex", flexDirection: "column", gap: "12px", background: "var(--bg-panel)" }}>
+                    
+                    {/* 上段：アクションボタン */}
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ fontSize: "0.85em", color: "var(--text-muted)", fontWeight: "600" }}>{codePopup.text}</span>
+                      
+                      <div style={{ display: "flex", gap: "8px" }}>
+                        {/* 🌟 追加: プレビュー実行ボタン */}
+                        <button 
+                          onClick={async () => {
+                            setCodePopup(p => p ? { ...p, isPreviewLoading: true, previewImage: null, previewError: null } : null);
+                            try {
+                              const res = await fetch("http://127.0.0.1:8000/api/run_preview", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ code: codePopup.code })
+                              });
+                              const data = await res.json();
+                              if (data.status === "success" && data.image) {
+                                setCodePopup(p => p ? { ...p, previewImage: data.image, isPreviewLoading: false } : null);
+                              } else {
+                                setCodePopup(p => p ? { ...p, previewError: data.error || data.output || "プレビューを生成できませんでした。", isPreviewLoading: false } : null);
+                              }
+                            } catch (e: any) {
+                              setCodePopup(p => p ? { ...p, previewError: e.message, isPreviewLoading: false } : null);
+                            }
+                          }} 
+                          disabled={codePopup.isPreviewLoading}
+                          style={{ background: "transparent", color: "#10b981", padding: "6px 16px", borderRadius: "6px", border: "1px solid #10b981", fontWeight: "bold", cursor: codePopup.isPreviewLoading ? "wait" : "pointer", display: "flex", alignItems: "center", gap: "8px", transition: "all 0.2s" }}
+                          onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(16, 185, 129, 0.1)"; }}
+                          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                        >
+                          <span style={{ fontSize: "1.1em" }}>▶️</span> 静的プレビューを実行
+                        </button>
+
+                        <button 
+                          onClick={() => {
+                            navigator.clipboard.writeText(codePopup.code);
+                            alert("クリップボードにコピーしました！"); 
+                          }} 
+                          style={{ background: "#1976d2", color: "white", padding: "6px 16px", borderRadius: "6px", border: "none", fontWeight: "bold", cursor: "pointer", display: "flex", alignItems: "center", gap: "8px", boxShadow: "0 2px 8px rgba(25, 118, 210, 0.3)", transition: "all 0.2s" }}
+                          onMouseEnter={(e) => e.currentTarget.style.transform = "translateY(-1px)"}
+                          onMouseLeave={(e) => e.currentTarget.style.transform = "translateY(0)"}
+                        >
+                          <span style={{ fontSize: "1.1em" }}>📋</span> コードをコピー
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* 下段：デバッグ・修正リクエスト入力 */}
+                    <div style={{ display: "flex", gap: "8px", alignItems: "center", background: "var(--bg-app)", padding: "8px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-light)" }}>
+                      <span style={{ fontSize: "1.2em", paddingLeft: "4px" }}>🐞</span>
+                      <input 
+                        type="text" 
+                        value={codeFeedback}
+                        onChange={(e) => setCodeFeedback(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && codeFeedback.trim()) {
+                            askAgent("code", codePopup.threadId, "fix", `【コードの修正要求】\n${codeFeedback}`);
+                            setCodePopup(null);
+                            setCodeFeedback("");
+                          }
+                        }}
+                        placeholder="エラー内容や変更の要望を入力（プレビューで出たエラーのコピペもOK）" 
+                        style={{ flex: 1, border: "none", background: "transparent", outline: "none", color: "var(--text-main)", fontSize: "0.9em" }}
+                      />
+                      <button 
+                        onClick={() => {
+                          if (!codeFeedback.trim()) return;
+                          askAgent("code", codePopup.threadId, "fix", `【コードの修正要求】\n${codeFeedback}`);
+                          setCodePopup(null);
+                          setCodeFeedback("");
+                        }}
+                        disabled={!codeFeedback.trim() || isLoading}
+                        style={{ padding: "6px 12px", background: codeFeedback.trim() ? "#f59e0b" : "var(--border-light)", color: codeFeedback.trim() ? "white" : "var(--text-muted)", border: "none", borderRadius: "4px", fontWeight: "bold", cursor: codeFeedback.trim() ? "pointer" : "not-allowed", transition: "all 0.2s" }}
+                      >
+                        リクエスト送信
+                      </button>
+                    </div>
+
+                  </div>
+
+                </div>
+              </div>
+            )}
           </>
         ) : (
           /* ＝＝＝＝＝ ネットワークモード全体 ＝＝＝＝＝ */

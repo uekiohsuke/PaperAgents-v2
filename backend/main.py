@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -13,6 +13,7 @@ from citation_agent import get_oa_status_from_text
 from fastapi import UploadFile, File
 import os
 import shutil
+import base64
 
 pdf_parser = None 
 print("✅ サーバーを立ち上げました。PDFのアップロードを待機しています。")
@@ -38,7 +39,7 @@ class ChatMessage(BaseModel):
     content: str
 
 class AgentRequest(BaseModel):
-    task_type: Literal["qa", "math", "citation", "chart"]
+    task_type: Literal["qa", "math", "citation", "chart", "code"]
     context: ContextData
     payload: PayloadData
     chat_history: List[ChatMessage] = []
@@ -165,6 +166,7 @@ async def run_agent(request: AgentRequest):
             "action_type": request.payload.action_type or "",
             "selected_citation": request.payload.selected_citation or "",
             "target_reference_text": target_reference or "",
+            "code_result": "",
         }
         
         # グラフ（Supervisor）の実行
@@ -196,10 +198,63 @@ async def run_agent(request: AgentRequest):
                 await asyncio.sleep(0.01)
                 yield f"data: {json.dumps({'chunk': char, 'task_type': 'citation'})}\n\n"
 
+        elif request.task_type == "code": # 🌟 Code用の出力処理を追加
+            answer = graph_result.get("code_result", "エラー: コードが生成されませんでした。")
+            for char in answer:
+                await asyncio.sleep(0.01)
+                yield f"data: {json.dumps({'chunk': char, 'task_type': 'code'})}\n\n"
+
         dict_data = graph_result.get("dict_suggestions", "{}")
         yield f"data: {json.dumps({'done': True, 'dict_suggestions': dict_data})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@app.post("/api/run_preview")
+async def run_preview(request: Request):
+    data = await request.json()
+    code = data.get("code", "")
+
+    # 🌟 ハック: GUIを抑制し、plt.show() を画像保存に強制置換する
+    safe_code = (
+        "import matplotlib\n"
+        "matplotlib.use('Agg')\n" # バックエンド描画モードを強制
+    ) + code.replace("plt.show()", "plt.savefig('temp_preview.png', bbox_inches='tight')")
+
+    # 一時ファイルとして書き出し
+    with open("temp_sim.py", "w", encoding="utf-8") as f:
+        f.write(safe_code)
+
+    try:
+        # サブプロセスで別スレッドとして実行（メインアプリをフリーズさせない）
+        # タイムアウトを設けて無限ループを防止
+        process = await asyncio.create_subprocess_exec(
+            "python", "temp_sim.py",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=5.0)
+
+        if process.returncode != 0:
+            return {"status": "error", "error": stderr.decode()}
+
+        # グラフ画像が生成されていればBase64に変換して返す
+        if os.path.exists("temp_preview.png"):
+            with open("temp_preview.png", "rb") as img:
+                b64 = base64.b64encode(img.read()).decode("utf-8")
+            os.remove("temp_preview.png")
+            return {"status": "success", "image": f"data:image/png;base64,{b64}"}
+        else:
+            # 画像が出ない計算コード等の場合
+            return {"status": "success", "output": stdout.decode()}
+
+    except asyncio.TimeoutError:
+        return {"status": "error", "error": "実行がタイムアウトしました（5秒）。動的シミュレーション、または計算が重すぎます。"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+    finally:
+        # 実行用の一時ファイルを掃除
+        if os.path.exists("temp_sim.py"):
+            os.remove("temp_sim.py")
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
