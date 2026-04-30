@@ -24,6 +24,7 @@ print("✅ サーバーを立ち上げました。PDFのアップロードを待
 class ContextData(BaseModel):
     paper_metadata: Optional[str] = None
     current_context: str
+    library_context: Optional[dict] = None
 
 class PayloadData(BaseModel):
     selected_text: Optional[str] = None
@@ -39,7 +40,7 @@ class ChatMessage(BaseModel):
     content: str
 
 class AgentRequest(BaseModel):
-    task_type: Literal["qa", "math", "citation", "chart", "code"]
+    task_type: Literal["qa", "math", "citation", "chart", "code", "library"]
     context: ContextData
     payload: PayloadData
     chat_history: List[ChatMessage] = []
@@ -144,6 +145,15 @@ async def run_agent(request: AgentRequest):
                     print("🔍 バックエンドでページ横断の文脈を再抽出しました。")
             else:
                 print("⚠️ pdf_parserが未初期化のため、フロントエンドの文脈をそのまま使用します。")
+        elif request.task_type == "library":
+            search_query = request.payload.action_type or request.payload.user_intent or ""
+            if pdf_parser is not None and getattr(pdf_parser, "vectorstore", None) is not None:
+                print(f"🔍 RAG検索を実行中: {search_query}")
+                search_result = pdf_parser.similarity_search(search_query)
+                current_context = f"【RAG検索結果】\n{search_result}"
+                print("✅ RAG検索完了")
+            else:
+                current_context = "ベクトルDBが構築されていません。"
 
         # State を構築
         state = {
@@ -153,6 +163,7 @@ async def run_agent(request: AgentRequest):
             "extracted_text": None, 
             
             "current_context": current_context,
+            "library_context": request.context.library_context or {},
             "paper_metadata": request.context.paper_metadata or "",
             "chat_history": [{"role": msg.role, "content": msg.content} for msg in request.chat_history],
             
@@ -173,7 +184,7 @@ async def run_agent(request: AgentRequest):
         graph_result = await asyncio.to_thread(app_graph.invoke, state)
         
         # 🌟 修正3: 出力振り分け部分を正しく Chart に対応させる
-        if request.task_type == "qa":
+        if request.task_type in ["qa", "library"]:
             answer = graph_result.get("qa_answer", "エラー: 回答が生成されませんでした。")
             for char in answer:
                 await asyncio.sleep(0.01)

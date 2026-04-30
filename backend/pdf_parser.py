@@ -1,5 +1,12 @@
 import fitz  # PyMuPDF
 import re
+import traceback
+
+# 🌟 追加: RAG用のライブラリ
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_ollama import OllamaEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
 
 class PaperParser:
     def __init__(self, file_path: str):
@@ -13,12 +20,14 @@ class PaperParser:
         self.citation_pages = {} 
         self.page_texts = {}
         
+        self.vectorstore = None # 🌟 追加: ベクトルDBの格納先
+        
         # 初期化時に自動で全解析を走らせる
         self._parse_all()
 
     def _parse_all(self):
         text_blocks = []
-        fallback_toc = [] # 変更：自前目次を一時保存するリスト
+        fallback_toc = [] 
         
         for page_num in range(len(self.doc)):
             page = self.doc[page_num]
@@ -35,13 +44,11 @@ class PaperParser:
                 section_num = None
                 section_title = None
                 
-                # パターンA：同じ行に番号とタイトル
                 match_same = re.match(r'^([1-9]\d*(?:\.\d+)*)\s+([A-Za-zぁ-んァ-ヶｱ-ﾝﾞﾟ一-龠].*)$', line)
                 if match_same:
                     section_num = match_same.group(1)
                     section_title = match_same.group(2)
                 else:
-                    # パターンB：改行で分断されている場合
                     if i > 0:
                         prev_line = lines[i-1].strip()
                         if re.match(r'^([1-9]\d*(?:\.\d+)*)$', prev_line):
@@ -58,7 +65,6 @@ class PaperParser:
                     if section_title.endswith(('。', '、', '.', ',')):
                         continue
                         
-                    # 数式特有の記号を含む場合は除外
                     if '=' in section_title or '+' in section_title:
                         continue
                         
@@ -71,20 +77,15 @@ class PaperParser:
         if metadata_toc:
             self.toc = metadata_toc
         else:
-            # タイトルの矛盾検知
             toc_dict = {}
             for item in fallback_toc:
                 sec_num = item[1].split(' ')[0]
                 sec_title = item[1][len(sec_num):].strip()
                 
                 if sec_num not in toc_dict:
-                    # 初めて見つけた番号ならそのまま登録
                     toc_dict[sec_num] = item
                 else:
-                    # 既に同じ番号が登録されている場合
                     existing_title = toc_dict[sec_num][1][len(sec_num):].strip()
-                    
-                    # 最初の3文字が同じであれば、ページ番号を目次ページから本文のページへ更新する
                     if existing_title.startswith(sec_title[:3]) or sec_title.startswith(existing_title[:3]):
                         toc_dict[sec_num] = item
             
@@ -92,27 +93,27 @@ class PaperParser:
             
         self._extract_references()
         self._map_citation_pages()
+        
+        # 🌟 追加: テキスト抽出が完了したらベクトルDBを構築する
+        self._build_vectorstore()
 
     def _extract_references(self):
-        # 「参考文献」や「References」という文字以降を切り出す
         ref_split = re.split(r'参考文献|References', self.full_text, flags=re.IGNORECASE)
         
         if len(ref_split) > 1:
-            ref_section = ref_split[-1] # 一番最後の分割部分を参考文献セクションとする
+            ref_section = ref_split[-1] 
             
-            # [1] 文献名... [2] 文献名... のパターンを抽出
             pattern = r'\[(\d+)\]\s*(.*?)(?=\[\d+\]|$)'
             matches = re.findall(pattern, ref_section, re.DOTALL)
             
             for match in matches:
-                ref_num = f"[{match[0]}]" # "[1]" の形にする
-                ref_text = match[1].strip().replace('\n', ' ') # 改行を取り除く
+                ref_num = f"[{match[0]}]" 
+                ref_text = match[1].strip().replace('\n', ' ') 
                 self.references[ref_num] = ref_text
 
     def _map_citation_pages(self):
         for ref_num in self.references.keys():
             self.citation_pages[ref_num] = []
-            # 例: "[1]" を正規表現で安全に検索（\[1\] のようにエスケープする）
             pattern = re.compile(re.escape(ref_num))
             
             for page_num, text in self.page_texts.items():
@@ -126,12 +127,60 @@ class PaperParser:
             
         match_index = self.full_text.find(search_text)
         if match_index == -1:
-            return search_text # 見つからなければそのまま返す
+            return search_text 
             
         start = max(0, match_index - window_size)
         end = min(len(self.full_text), match_index + len(search_text) + window_size)
         
         return self.full_text[start:end]
+
+    # 🌟🌟🌟 ここから下がRAG用の新規メソッド 🌟🌟🌟
+
+    def _build_vectorstore(self):
+        """PDFのページテキストをチャンク化し、FAISSベクトルDBを構築する"""
+        print("🧠 知識をベクトル化しています（FAISS構築中）...")
+        try:
+            docs = []
+            # ページごとにDocumentオブジェクトを作成（メタデータにページ番号を保持）
+            for page_num, text in self.page_texts.items():
+                if text.strip():
+                    docs.append(Document(page_content=text, metadata={"page": page_num, "source": self.file_path}))
+
+            # テキストを意味の塊（約500文字）ごとに分割
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=500,
+                chunk_overlap=50,
+                separators=["\n\n", "\n", "。", "、", " ", ""]
+            )
+            split_docs = text_splitter.split_documents(docs)
+
+            # OllamaのEmbeddingモデルを使用してベクトル化
+            embeddings = OllamaEmbeddings(model="mxbai-embed-large")
+
+            # FAISSデータベースの作成
+            self.vectorstore = FAISS.from_documents(split_docs, embeddings)
+            print("✅ ベクトルDBの構築が完了しました！")
+        except Exception as e:
+            print(f"⚠️ ベクトルDBの構築に失敗しました: {e}")
+            traceback.print_exc()
+
+    def similarity_search(self, query: str, k: int = 3) -> str:
+        """
+        質問(query)に対して、関連するテキストをベクトルDBから検索し、
+        LLMのプロンプトに埋め込みやすい文字列フォーマットで返す。
+        """
+        if not self.vectorstore:
+            return "ベクトルDBが構築されていないため、検索できません。"
+
+        # 関連度の高いチャンクを上位 k 件取得
+        results = self.vectorstore.similarity_search(query, k=k)
+
+        context_str = ""
+        for i, res in enumerate(results):
+            page = res.metadata.get('page', '?')
+            context_str += f"[参照元: p.{page}]\n{res.page_content}\n\n"
+
+        return context_str.strip()
 
 if __name__ == "__main__":
     test_pdf_path = "sample.pdf" 
@@ -139,19 +188,12 @@ if __name__ == "__main__":
     try:
         parser = PaperParser(test_pdf_path)
         
-        print("✅ PDFの解析が完了しました！\n")
-        print(f"📄 総文字数: {len(parser.full_text)} 文字")
-        
-        print("\n📑 抽出された目次:")
-        for item in parser.toc:
-            print(f"  - レベル{item[0]}: {item[1]} (p.{item[2]})")
-            
-        print("\n📚 抽出された参考文献:")
-        for num, text in parser.references.items():
-            print(f"  {num}: {text[:50]}...")
-            
-        print("\n🔍 文脈抽出テスト（'ブラウン運動' の前後50文字）:")
-        print(parser.get_context_around("原理", 400))
+        print("\n🔍 RAG ベクトル検索テスト:")
+        query = "コロイドの粘度"
+        print(f"質問: {query}")
+        print("-" * 30)
+        print(parser.similarity_search(query, k=2))
+        print("-" * 30)
         
     except Exception as e:
         print(f"エラーが発生しました: {e}")

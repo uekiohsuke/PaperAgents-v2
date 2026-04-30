@@ -6,13 +6,14 @@ from citation_agent import citation_agent_node
 from ocr_agent import ocr_agent_node
 from chart_agent import chart_agent_node
 from code_agent import code_agent_node
+from library_agent import library_agent_node
 
 # ==========================================
 # アプリ全体の統合State（新生Paper Agentの心臓部）
 # ==========================================
 class AppState(TypedDict):
     # --- 🌟 新規: 共通の入力データ ---
-    intent: Literal["qa", "math", "citation", "chart", "code"] # ユーザーの目的
+    intent: Literal["qa", "math", "citation", "chart", "code", "library"] # ユーザーの目的
     raw_image: Optional[str]     # 切り抜き画像（base64）
     raw_text: Optional[str]      # 選択テキスト
     
@@ -21,6 +22,7 @@ class AppState(TypedDict):
     
     # --- 共通の文脈データ ---
     current_context: str
+    library_context: dict
     paper_metadata: str
     chat_history: List[Dict[str, str]]
     references_dict: dict
@@ -69,6 +71,8 @@ def route_task(state: AppState) -> str:
         return "ChartNode"
     elif intent == "code":
         return "CodeNode"
+    elif intent == "library":
+        return "LibraryNode"
     else:
         raise ValueError(f"不明なタスクタイプです: {intent}")
 
@@ -84,6 +88,7 @@ builder.add_node("MathNode", math_agent_node)
 builder.add_node("CitationNode", citation_agent_node)
 builder.add_node("ChartNode", chart_agent_node)
 builder.add_node("CodeNode", code_agent_node)
+builder.add_node("LibraryNode", library_agent_node)
 
 # STARTからの条件分岐
 builder.add_conditional_edges(
@@ -95,7 +100,8 @@ builder.add_conditional_edges(
         "MathNode": "MathNode",
         "CitationNode": "CitationNode",
         "ChartNode": "ChartNode",
-        "CodeNode": "CodeNode"
+        "CodeNode": "CodeNode",
+        "LibraryNode": "LibraryNode"
     }
 )
 
@@ -108,7 +114,8 @@ builder.add_conditional_edges(
         "MathNode": "MathNode",
         "CitationNode": "CitationNode",
         "ChartNode": "ChartNode",
-        "CodeNode": "CodeNode"
+        "CodeNode": "CodeNode",
+        "LibraryNode": "LibraryNode"
     }
 )
 
@@ -118,5 +125,6 @@ builder.add_edge("MathNode", END)
 builder.add_edge("CitationNode", END)
 builder.add_edge("ChartNode", END)
 builder.add_edge("CodeNode", END)
+builder.add_edge("LibraryNode", END)
 
 app_graph = builder.compile()

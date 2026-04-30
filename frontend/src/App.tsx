@@ -57,6 +57,9 @@ type GraphNode = {
   group?: string;
   val: number; // ノードの大きさ（被引用数など）
   fileName?: string;
+  localCitationCount?: number;
+  oaStatus?: "unchecked" | "checking" | "open" | "closed";
+  docType?: "pdf" | "web" | "unknown";
 };
 
 type GraphLink = {
@@ -65,6 +68,8 @@ type GraphLink = {
 };
 
 type ViewMode = "reader" | "network";
+
+type NetworkDisplayMode = "graph" | "list";
 
 function App() {
   // PDFファイルstate
@@ -137,7 +142,7 @@ function App() {
   const [vocabList, setVocabList] = useState<TranslationVocab[]>([]);
   const [translationPopup, setTranslationPopup] = useState<{ text: string; pos: { x: number; y: number } } | null>(null);
 
-const [codePopup, setCodePopup] = useState<{ 
+  const [codePopup, setCodePopup] = useState<{ 
     text: string; 
     code: string; 
     threadId: string;
@@ -159,6 +164,8 @@ const [codePopup, setCodePopup] = useState<{
   const [pdfFilesMap, setPdfFilesMap] = useState<{ [key: string]: File }>({});
 
   const [viewMode, setViewMode] = useState<ViewMode>("reader"); // 表示モード切り替え
+
+  const [networkDisplayMode, setNetworkDisplayMode] = useState<NetworkDisplayMode>("graph");
 
   const [globalGraph, setGlobalGraph] = useState<any>(() => {
     const saved = localStorage.getItem("personal_citation_graph");
@@ -184,6 +191,41 @@ const [codePopup, setCodePopup] = useState<{
     return { nodes: [], links: [] };
   });
 
+  // 🌟 追加: フィルターとソートのState
+  const [filterStatus, setFilterStatus] = useState<"all" | "unchecked" | "checked" | "oa_open">("all");
+  const [filterType, setFilterType] = useState<"all" | "pdf" | "web">("all");
+  const [sortBy, setSortBy] = useState<"citation" | "title">("citation");
+
+// 🌟 修正: 親ノードはグラフの基準点なので、フィルタに関わらず常に表示する
+  const getProcessedNodes = useCallback((sourceNodes: any[]) => {
+    return sourceNodes
+      .filter(node => {
+        // 🌟 追加: 親（既読）なら無条件で表示
+        if (node.type === "loaded") return true; 
+
+        const status = node.oaStatus || "unchecked";
+        const type = node.docType || "unknown";
+
+        // 1. 状態（OA）フィルター
+        if (filterStatus === "unchecked" && status !== "unchecked") return false;
+        if (filterStatus === "checked" && (status === "unchecked" || status === "checking")) return false;
+        if (filterStatus === "oa_open" && status !== "open") return false;
+        
+        // 2. ドキュメント種類フィルター
+        if (filterType === "pdf" && type !== "pdf") return false;
+        if (filterType === "web" && type !== "web") return false;
+
+        return true;
+      })
+      .sort((a, b) => {
+        if (sortBy === "citation") {
+          return (b.localCitationCount || 0) - (a.localCitationCount || 0);
+        } else {
+          return a.title.localeCompare(b.title);
+        }
+      });
+  }, [filterStatus, filterType, sortBy]);
+
   const fgRef = useRef<any>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -204,6 +246,11 @@ const [codePopup, setCodePopup] = useState<{
   const [graphHistory, setGraphHistory] = useState<any[]>([]);
 
   const pendingNodeIdRef = useRef<string | null>(null);
+
+  // 🌟 追加: グローバル（ネットワーク）用チャットのState
+  const [isGlobalChatOpen, setIsGlobalChatOpen] = useState(false);
+  const [globalInputText, setGlobalInputText] = useState("");
+  const [globalMessages, setGlobalMessages] = useState<Message[]>([]);
 
   const triggerPdfUpload = (nodeId: string | null = null) => {
     pendingNodeIdRef.current = nodeId; // クリックした瞬間に確実に記憶させる
@@ -229,10 +276,12 @@ const [codePopup, setCodePopup] = useState<{
 
   useEffect(() => {
     if (fgRef.current) {
-      // charge（反発力）をマイナス方向に大きくしてノードを散らす（デフォルトは -30 程度）
-      fgRef.current.d3Force('charge').strength(-300);
-      // link（線）の長さを少し長くする
-      fgRef.current.d3Force('link').distance(60);
+      // 反発力を弱める (デフォルト -30, 前は -300 だったのを -120 に)
+      fgRef.current.d3Force('charge').strength(-120);
+      // リンクの距離を少し長めに保つ
+      fgRef.current.d3Force('link').distance(80);
+      // 中央へ引き戻す力（重力）を少し強める
+      fgRef.current.d3Force('center').strength(0.05);
     }
   }, [globalGraph]);
 
@@ -289,6 +338,42 @@ const [codePopup, setCodePopup] = useState<{
     setSelectedNode((prev: any) => prev && prev.id === nodeId ? { ...prev, type: "unloaded", val: 5 } : prev);
   }, [saveHistory]);
 
+// 🌟 修正: URLの実データもノードに記録する
+  const updateNodeOaStatus = useCallback((nodeId: string, data: any) => {
+    setGlobalGraph((prev: any) => {
+      const nodes = [...prev.nodes];
+      const idx = nodes.findIndex((n: any) => n.id === nodeId);
+      if (idx >= 0) {
+        let docType = "unknown";
+        let oaStatus = "checked";
+        
+        if (data.url) {
+          oaStatus = "open";
+          if (data.url.toLowerCase().endsWith('.pdf')) docType = "pdf";
+          else docType = "web";
+        }
+        
+        // 🌟 追加: url, scholar_url, cinii_url を保存データに含める
+        nodes[idx] = { 
+          ...nodes[idx], 
+          oaStatus, 
+          docType,
+          url: data.url,
+          scholar_url: data.scholar_url,
+          cinii_url: data.cinii_url
+        };
+      }
+
+      const cleanLinks = prev.links.map((l: any) => ({
+        ...l,
+        source: typeof l.source === 'object' ? l.source.id : l.source,
+        target: typeof l.target === 'object' ? l.target.id : l.target
+      }));
+
+      return { nodes, links: cleanLinks };
+    });
+  }, []);
+
   // 🌟 修正: グラフを一切触らず、純粋にリストのIDだけを追加・削除する
   const togglePin = useCallback((nodeId: string) => {
     setPinnedNodeIds(prev => {
@@ -301,51 +386,68 @@ const [codePopup, setCodePopup] = useState<{
   }, []);
 
   // 🌟 グラフの結合ロジック
-  const mergeToGlobalGraph = (fileName: string, references: { [key: string]: string }) => {
-    // 🚨 修正ポイント1: Reactの2回実行（StrictMode）対策。
-    // 記憶（Ref）の読み取りを setState の「外側」で行い、確実に値を確保する。
-    const targetId = pendingNodeIdRef.current || fileName;
+  const mergeToGlobalGraph = (fileName: string, references: { [key: string]: string }, citationPagesData: { [key: string]: number[] } = {}) => {
+    // 1. 実行前に確実に ID を確保し、Refをクリア
+    const targetId = pendingNodeIdRef.current;
+    pendingNodeIdRef.current = null;
 
     setGlobalGraph((prev: any) => {
+      // 履歴を保存
+      const cleanNodesForHistory = prev.nodes.map((n: any) => ({ ...n }));
+      const cleanLinksForHistory = prev.links.map((l: any) => ({
+        ...l,
+        source: typeof l.source === 'object' ? l.source.id : l.source,
+        target: typeof l.target === 'object' ? l.target.id : l.target
+      }));
+      setGraphHistory(history => [...history, { nodes: cleanNodesForHistory, links: cleanLinksForHistory }].slice(-10));
+
       const nodes = [...prev.nodes];
       const links = [...prev.links];
 
-      // 既存ノードの検索（IDかタイトルが一致するものを探す）
-      const existingIdx = nodes.findIndex(n => n.id === targetId || n.id === fileName);
+      // 2. 更新対象の検索（実体化 ID があれば優先、なければファイル名）
+      const existingIdx = nodes.findIndex(n => (targetId && n.id === targetId) || n.id === fileName);
 
       let activeNodeId = fileName;
 
       if (existingIdx >= 0) {
         activeNodeId = nodes[existingIdx].id; 
-
-        const oldTitle = nodes[existingIdx].title;
-        if (!oldTitle.includes(fileName)) {
-          // 長すぎる場合は省略
-          const shortOldTitle = oldTitle.length > 20 ? oldTitle.substring(0, 20) + "..." : oldTitle;
-          nodes[existingIdx].title = `${fileName} [旧: ${shortOldTitle}]`;
-        }
-
-        nodes[existingIdx].title = fileName;
-        nodes[existingIdx].type = "loaded";
-        nodes[existingIdx].val = 10;
-        nodes[existingIdx].fileName = fileName;
+        
+        // 🌟 重要: オブジェクトをスプレッド構文で新しく作り直す（これでReactが検知できる）
+        nodes[existingIdx] = { 
+          ...nodes[existingIdx],
+          title: fileName,
+          type: "loaded",
+          val: 10,
+          fileName: fileName
+        };
       } else {
+        // 新規追加
         nodes.push({ id: fileName, title: fileName, type: "loaded", val: 10, fileName: fileName });
       }
 
-      // 参考文献の追加とリンク生成
-      Object.entries(references).forEach(([_, refText]) => {
+      // 3. 参考文献の追加とリンク生成
+      Object.entries(references).forEach(([refNum, refText]) => {
         const refId = refText.substring(0, 100); 
+        const citationCount = citationPagesData[refNum] ? citationPagesData[refNum].length : 1;
         if (!nodes.find(n => n.id === refId)) {
-          let startX = 0;
-          let startY = 0;
+          // 親ノードの近くに配置するための座標計算
+          let startPos = {};
           if (existingIdx >= 0 && nodes[existingIdx].x !== undefined) {
-              startX = nodes[existingIdx].x + (Math.random() * 2 - 1);
-              startY = nodes[existingIdx].y + (Math.random() * 2 - 1);
-              nodes.push({ id: refId, title: refText, type: "unloaded", val: 5, x: startX, y: startY });
-          } else {
-              nodes.push({ id: refId, title: refText, type: "unloaded", val: 5 });
+            startPos = {
+              x: nodes[existingIdx].x + (Math.random() * 20 - 10),
+              y: nodes[existingIdx].y + (Math.random() * 20 - 10)
+            };
           }
+          nodes.push({ 
+            id: refId, 
+            title: refText, 
+            type: "unloaded", 
+            val: Math.max(5, citationCount * 3), // 引力（大きさ）
+            localCitationCount: citationCount,
+            oaStatus: "unchecked",
+            docType: "unknown",
+            ...startPos 
+          });
         }
         
         const linkExists = links.find(l => {
@@ -361,9 +463,6 @@ const [codePopup, setCodePopup] = useState<{
 
       return { nodes, links };
     });
-
-    // 🚨 修正ポイント2: グラフの更新処理が「完全に終わってから」記憶をクリアする！
-    pendingNodeIdRef.current = null; 
   };
 
   // 🌟 追加: 特定のPDFとその引用関係をネットワークから削除する
@@ -401,9 +500,22 @@ const [codePopup, setCodePopup] = useState<{
     });
   }, []);
 
+// 🌟 修正: クリック時に保存しておいたURLデータを取り出す
   const handleNodeClick = useCallback((node: any) => {
     setSelectedNode(node);
-    setNodeOaInfo(null); // 別のノードを選んだらOA情報をリセット
+    
+    if (node.oaStatus && node.oaStatus !== "unchecked" && node.oaStatus !== "checking") {
+      setNodeOaInfo({
+        status: node.oaStatus === "open" ? (node.docType === "pdf" ? "✅ PDFあり" : "🌐 Web記事あり") : "❌ アクセス不可",
+        color: node.oaStatus === "open" ? (node.docType === "pdf" ? "green" : "blue") : "gray",
+        // 🌟 追加: 記録しておいたURL情報をセットする
+        url: node.url,
+        scholar_url: node.scholar_url,
+        cinii_url: node.cinii_url
+      });
+    } else {
+      setNodeOaInfo(null);
+    }
   }, []);
 
   // 🌟 追加: ネットワーク画面から既読PDFをReaderで開き直す関数
@@ -450,6 +562,71 @@ const [codePopup, setCodePopup] = useState<{
     }
   }, [fgRef]);
 
+  // 🌟 追加: ネスト式リストの描画
+  const renderNestedList = () => {
+    // 1. まず「既読PDF（loaded）」を親として抽出
+    const parentNodes = globalGraph.nodes.filter((n: any) => n.type === "loaded");
+
+    return (
+      <div style={{ padding: "20px 40px 40px 320px", color: "var(--text-main)", overflowY: "auto", height: "100%" }}>
+        <h3 style={{ fontSize: "1.1em", marginBottom: "20px", borderBottom: "2px solid var(--border-light)", paddingBottom: "10px" }}>
+          📂 論文の階層構造（引用ツリー）
+        </h3>
+        {parentNodes.map((parent: any) => {
+          // 2. この親から伸びているリンクを探し、その先のノード（子）を特定
+          const childIds = globalGraph.links
+            .filter((l: any) => (typeof l.source === 'object' ? l.source.id : l.source) === parent.id)
+            .map((l: any) => (typeof l.target === 'object' ? l.target.id : l.target));
+          
+          const rawChildren = globalGraph.nodes.filter((n: any) => childIds.includes(n.id));
+          const children = getProcessedNodes(rawChildren);
+
+          return (
+            <div key={parent.id} style={{ marginBottom: "16px", background: "var(--bg-panel)", borderRadius: "var(--radius-md)", border: "1px solid var(--border-light)", overflow: "hidden" }}>
+              {/* 親ノード行 */}
+              <div 
+                onClick={() => handleFocusNode(parent)}
+                style={{ padding: "10px 15px", background: "var(--bg-hover)", cursor: "pointer", display: "flex", alignItems: "center", gap: "10px", fontWeight: "bold" }}
+              >
+                <span>🔵</span>
+                <span style={{ flex: 1 }}>{parent.title}</span>
+                <span style={{ fontSize: "0.8em", color: "var(--text-muted)" }}>({children.length} citations)</span>
+              </div>
+              
+              {/* 子ノード（参考文献）リスト */}
+              <div style={{ padding: "4px 0 4px 35px" }}>
+                {children.map((child: any) => (
+                  <div 
+                    key={child.id} 
+                    onClick={() => handleFocusNode(child)}
+                    style={{ padding: "6px 12px", fontSize: "0.9em", borderLeft: "1px solid var(--border-light)", cursor: "pointer", transition: "background 0.2s", display: "flex", alignItems: "center", gap: "8px" }}
+                    onMouseEnter={e => e.currentTarget.style.background = "var(--bg-hover)"}
+                    onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+                  >
+                    <span style={{ color: child.type === "loaded" ? "#1976d2" : "#9ca3af" }}>
+                      {child.type === "loaded" ? "●" : "○"}
+                    </span>
+                    <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {child.title}
+                    </span>
+                  </div>
+                ))}
+                {children.length === 0 && (
+                  <div style={{ padding: "8px 12px", fontSize: "0.85em", color: "var(--text-muted)", fontStyle: "italic" }}>引用データなし</div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+        {parentNodes.length === 0 && (
+          <div style={{ textAlign: "center", marginTop: "50px", color: "var(--text-muted)" }}>
+            まだ読み込まれたPDFがありません。
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const handleCheckNodeOa = async () => {
     if (!selectedNode || !selectedNode.title) return;
     setIsFetchingOa(true);
@@ -461,6 +638,7 @@ const [codePopup, setCodePopup] = useState<{
       });
       const data = await res.json();
       setNodeOaInfo(data);
+      updateNodeOaStatus(selectedNode.id, data);
     } catch (error) {
       console.error("OAステータス取得エラー:", error);
       setNodeOaInfo({ status: "取得エラー", color: "gray" });
@@ -552,7 +730,7 @@ const [codePopup, setCodePopup] = useState<{
       });
       const data = await res.json();
       if (data.references) {
-        mergeToGlobalGraph(file.name, data.references);
+        mergeToGlobalGraph(file.name, data.references, data.citation_pages);
       }
       
       // 🌟 変更: Pythonのフォーマット [level, title, page_num] をフロントエンド用にマッピングして「仮セット」する
@@ -569,6 +747,7 @@ const [codePopup, setCodePopup] = useState<{
       
       setPdfFile(file);
       setPdfUrl(URL.createObjectURL(file));
+      setViewMode("reader");
       
     } catch (error) {
       console.error("アップロードエラー:", error);
@@ -977,6 +1156,105 @@ async function onDocumentLoadSuccess(pdf: any) {
     }
   };
 
+  // 🌟 追加: Suiから言及されて「光る」ノードのIDリスト
+  const [highlightedNodes, setHighlightedNodes] = useState<string[]>([]);
+
+  // 🌟 追加: Library Agent専用の送信関数
+const askLibraryAgent = async (text: string) => {
+    if (!text.trim()) return;
+    setIsLoading(true);
+    setHighlightedNodes([]); // 質問ごとにハイライトをリセット
+
+    const userMsg: Message = { id: Date.now().toString(), role: "user", content: text };
+    const aiMsgId = (Date.now() + 1).toString();
+    const aiMsg: Message = { id: aiMsgId, role: "ai", content: "" };
+
+    // 🌟 修正: 先に新しい履歴の配列を確定させておく（Reactの非同期遅延を回避！）
+    const updatedMessagesForBackend = [...globalMessages, userMsg];
+    
+    setGlobalMessages([...updatedMessagesForBackend, aiMsg]);
+    setGlobalInputText("");
+
+    // 現在のネットワーク状態を収集してSuiに送る準備
+    const loaded_pdfs = globalGraph.nodes.filter((n: any) => n.type === "loaded").map((n: any) => n.id);
+    const unloaded_references = globalGraph.nodes.filter((n: any) => n.type === "unloaded").map((n: any) => ({
+      id: n.id,
+      title: n.title,
+      citations: n.localCitationCount || 0
+    }));
+
+    abortControllerRef.current = new AbortController();
+
+    try {
+      const response = await fetch("http://127.0.0.1:8000/api/agent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: abortControllerRef.current.signal,
+        body: JSON.stringify({
+          task_type: "library",
+          context: { 
+            current_context: "", // RAGが裏で埋めるので空でOK
+            library_context: { loaded_pdfs, unloaded_references } 
+          },
+          // 🌟 修正: バックエンドが確実に取りこぼさないよう、各種プロパティにテキストを明示する
+          payload: { 
+            selected_text: text,
+            user_intent: text,
+            action_type: "library"
+          },
+          // 🌟 修正: AIの空枠を含まない、最新の質問までの履歴を送る
+          chat_history: updatedMessagesForBackend.map(m => ({ role: m.role, content: m.content }))
+        })
+      });
+
+      if (!response.body) throw new Error("ストリーム非対応");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      
+      let accumulatedResponse = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunkStr = decoder.decode(value, { stream: true });
+        const lines = chunkStr.split('\n');
+        
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const dataStr = line.slice(6);
+            if (!dataStr.trim()) continue;
+
+            const data = JSON.parse(dataStr);
+            
+            if (data.chunk) {
+              accumulatedResponse += data.chunk;
+              
+              // 🌟 魔法のロジック: ストリーム中に [node:xxx] が出たらハイライトをオンにする
+              const nodeMatches = [...accumulatedResponse.matchAll(/\[node:(.*?)\]/g)];
+              if (nodeMatches.length > 0) {
+                const ids = nodeMatches.map(m => m[1]);
+                setHighlightedNodes(prev => [...new Set([...prev, ...ids])]); // 重複排除してセット
+              }
+
+              setGlobalMessages(prev => prev.map(msg => 
+                msg.id === aiMsgId ? { ...msg, content: accumulatedResponse } : msg
+              ));
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error(error);
+      setGlobalMessages(prev => prev.map(msg => 
+        msg.id === aiMsgId ? { ...msg, content: "⚠️ エラーが発生しました。" } : msg
+      ));
+    } finally {
+      setIsLoading(false);
+      abortControllerRef.current = null;
+    }
+  };
+    
   const askAgent = async (taskType: "qa" | "math" | "citation" | "chart" | "code",targetThreadId: string, subOption?: string, customText?: string, pos?: {x: number, y: number} | null) => {
     // 選択テキスト、画像、自由入力のいずれかが無いと発火しない
     if (!selectedText && !croppedImage && !customText) return; 
@@ -1336,30 +1614,54 @@ async function onDocumentLoadSuccess(pdf: any) {
                         )}
                         {Object.keys(references).length > 0 ? (
                           Object.entries(references).map(([refNum, refText]) => {
-                            const status = oaStatuses[refNum];
+                            const refId = refText.substring(0, 100);
+                            const graphNode = globalGraph.nodes.find((n: any) => n.id === refId);
+                            const currentOaStatus = graphNode ? graphNode.oaStatus : "unchecked";
+                            const currentDocType = graphNode ? graphNode.docType : "unknown";
+
+                            // UI表示用の状態変換
                             let statusBg = "var(--bg-hover)"; let statusText = "var(--text-muted)";
-                            if (status?.color === "green") { statusBg = "#DCFCE7"; statusText = "#166534"; }
-                            else if (status?.color === "yellow") { statusBg = "#FEF9C3"; statusText = "#854D0E"; }
-                            else if (status?.color === "orange") { statusBg = "#FFEDD5"; statusText = "#9A3412"; }
-                            else if (status?.color === "blue") { statusBg = "#DBEAFE"; statusText = "#1E40AF"; }
+                            let displayStatusText = "";
+                            
+                            if (currentOaStatus === "open") {
+                              if (currentDocType === "pdf") { statusBg = "#DCFCE7"; statusText = "#166534"; displayStatusText = "✅ PDF"; }
+                              else { statusBg = "#DBEAFE"; statusText = "#1E40AF"; displayStatusText = "🌐 Web"; }
+                            } else if (currentOaStatus === "checked") {
+                              statusBg = "#F3F4F6"; statusText = "#6B7280"; displayStatusText = "❌ 不可";
+                            } else if (currentOaStatus === "checking") {
+                              displayStatusText = "⏳ 確認中...";
+                            }
+
+                            // ※ oaStatuses (辞書State) は、一時的なURL情報などを保持するためだけに残す
+                            const tempStatusData = oaStatuses[refNum];
 
                             return (
                               <div key={refNum} style={{ position: "relative", background: "var(--bg-panel)", padding: "14px", borderRadius: "var(--radius-md)", border: "1px solid var(--border-light)", boxShadow: "var(--shadow-sm)" }} onMouseEnter={(e) => { const btn = e.currentTarget.querySelector('.ref-delete-btn') as HTMLElement; if (btn) btn.style.opacity = '1'; }} onMouseLeave={(e) => { const btn = e.currentTarget.querySelector('.ref-delete-btn') as HTMLElement; if (btn) btn.style.opacity = '0'; }}>
                                 <button className="ref-delete-btn" onClick={() => handleDeleteRef(refNum)} style={{ position: "absolute", top: "-8px", right: "-8px", opacity: 0, background: "var(--bg-panel)", color: "var(--text-muted)", border: "1px solid var(--border-light)", borderRadius: "50%", width: "24px", height: "24px", cursor: "pointer", fontSize: "0.8em", display: "flex", justifyContent: "center", alignItems: "center", zIndex: 5, boxShadow: "var(--shadow-sm)", transition: "all 0.2s" }} onMouseEnter={(e) => { e.currentTarget.style.color = "#ef4444"; e.currentTarget.style.borderColor = "#ef4444"; }} onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.borderColor = "var(--border-light)"; }} title="この文献を削除">✕</button>
                                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
                                   <div style={{ fontWeight: "600", color: "var(--text-main)", fontSize: "0.9em" }}>{refNum}</div>
-                                  {status && (<div style={{ fontSize: "0.75em", background: statusBg, color: statusText, padding: "2px 8px", borderRadius: "12px", fontWeight: "600", border: `1px solid ${statusBg}` }}>{status.status}</div>)}
+                                  {tempStatusData && (<div style={{ fontSize: "0.75em", background: statusBg, color: statusText, padding: "2px 8px", borderRadius: "12px", fontWeight: "600", border: `1px solid ${statusBg}` }}>{tempStatusData.status}</div>)}
                                 </div>
                                 <div style={{ fontSize: "0.85em", color: "var(--text-muted)", marginBottom: "12px", lineHeight: "1.5" }}>{refText.length > 70 ? refText.substring(0, 70) + "..." : refText}</div>
                                 <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", alignItems: "center" }}>
-                                  {(!status || status.status === "確認中...") && (
-                                    <button onClick={async () => { setOaStatuses(prev => ({ ...prev, [refNum]: { status: "確認中...", color: "gray" } })); try { const res = await fetch("http://127.0.0.1:8000/api/check_oa", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ raw_citation: refText }) }); const data = await res.json(); setOaStatuses(prev => ({ ...prev, [refNum]: data })); } catch (error) { setOaStatuses(prev => ({ ...prev, [refNum]: { status: "エラー", color: "gray" } })); } }} disabled={status?.status === "確認中..."} style={{ padding: "4px 10px", background: "var(--bg-hover)", color: "var(--text-main)", border: "1px solid var(--border-light)", borderRadius: "var(--radius-sm)", cursor: "pointer", fontSize: "0.8em", fontWeight: "500" }}>{status?.status === "確認中..." ? "⏳ 確認中..." : "🚦 OA確認"}</button>
+                                  {(!currentOaStatus || currentOaStatus === "unchecked") && (
+                                    <button onClick={async () => { 
+                                      setOaStatuses(prev => ({ ...prev, [refNum]: { status: "確認中...", color: "gray" } })); 
+                                      try { 
+                                        const res = await fetch("http://127.0.0.1:8000/api/check_oa", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ raw_citation: refText }) }); 
+                                        const data = await res.json(); 
+                                        setOaStatuses(prev => ({ ...prev, [refNum]: data })); 
+                                        updateNodeOaStatus(refText.substring(0, 100), data);
+                                      } catch (error) { 
+                                        setOaStatuses(prev => ({ ...prev, [refNum]: { status: "エラー", color: "gray" } })); }
+                                      }
+                                    } disabled={currentOaStatus === "checking"} style={{ padding: "4px 10px", background: "var(--bg-hover)", color: "var(--text-main)", border: "1px solid var(--border-light)", borderRadius: "var(--radius-sm)", cursor: "pointer", fontSize: "0.8em", fontWeight: "500" }}>{currentOaStatus === "checking" ? "⏳ 確認中..." : "🚦 OA確認"}</button>
                                   )}
-                                  {status?.url && (<button onClick={(e) => handleOpenLink(e, status.url)} style={{ padding: "4px 10px", background: statusBg, color: statusText, border: "none", borderRadius: "var(--radius-sm)", cursor: "pointer", fontSize: "0.8em", fontWeight: "600" }}>{status.color === "blue" ? "🌐 サイトへ" : "📥 PDFを開く"}</button>)}
-                                  {(status?.color === "orange" || status?.color === "gray") && (
+                                  {tempStatusData?.url && (<button onClick={(e) => handleOpenLink(e, tempStatusData.url)} style={{ padding: "4px 10px", background: statusBg, color: statusText, border: "none", borderRadius: "var(--radius-sm)", cursor: "pointer", fontSize: "0.8em", fontWeight: "600" }}>{tempStatusData.color === "blue" ? "🌐 サイトへ" : "📥 PDFを開く"}</button>)}
+                                  {(tempStatusData?.color === "orange" || tempStatusData?.color === "gray") && (
                                     <>
-                                      {status.scholar_url && (<button onClick={(e) => handleOpenLink(e, status.scholar_url)} style={{ padding: "4px 10px", background: "transparent", color: "var(--text-main)", border: "1px solid var(--border-light)", borderRadius: "var(--radius-sm)", cursor: "pointer", fontSize: "0.8em", fontWeight: "500" }}>🎓 Scholar</button>)}
-                                      {status.cinii_url && (<button onClick={(e) => handleOpenLink(e, status.cinii_url)} style={{ padding: "4px 10px", background: "transparent", color: "var(--text-main)", border: "1px solid var(--border-light)", borderRadius: "var(--radius-sm)", cursor: "pointer", fontSize: "0.8em", fontWeight: "500" }}>📚 CiNii</button>)}
+                                      {tempStatusData.scholar_url && (<button onClick={(e) => handleOpenLink(e, tempStatusData.scholar_url)} style={{ padding: "4px 10px", background: "transparent", color: "var(--text-main)", border: "1px solid var(--border-light)", borderRadius: "var(--radius-sm)", cursor: "pointer", fontSize: "0.8em", fontWeight: "500" }}>🎓 Scholar</button>)}
+                                      {tempStatusData.cinii_url && (<button onClick={(e) => handleOpenLink(e, tempStatusData.cinii_url)} style={{ padding: "4px 10px", background: "transparent", color: "var(--text-main)", border: "1px solid var(--border-light)", borderRadius: "var(--radius-sm)", cursor: "pointer", fontSize: "0.8em", fontWeight: "500" }}>📚 CiNii</button>)}
                                     </>
                                   )}
                                 </div>
@@ -1770,10 +2072,14 @@ async function onDocumentLoadSuccess(pdf: any) {
           <div style={{ display: "flex", flex: 1, width: "100%", height: "100%", background: "var(--bg-app)" }}>
             
             {/* 左側：サイドバーエリア */}
-            <div style={{ position: "absolute", top: "20px", left: "20px", zIndex: 10, display: "flex", flexDirection: "column", gap: "12px", width: "260px", maxHeight: "calc(100vh - 60px)" }}>
+            <div style={{ position: "absolute", top: "20px", left: "20px", zIndex: 10, display: "flex", flexDirection: "column", gap: "12px", width: "280px", height: "calc(100vh - 80px)" }}>
               
               {/* ステータス ＆ 操作 */}
               <div style={{ color: "var(--text-main)", fontSize: "0.9em", background: "var(--bg-panel)", padding: "12px 16px", borderRadius: "var(--radius-md)", boxShadow: "var(--shadow-sm)", border: "1px solid var(--border-light)" }}>
+                <div style={{ display: "flex", background: "var(--bg-app)", borderRadius: "4px", padding: "2px", marginBottom: "12px", border: "1px solid var(--border-light)" }}>
+                  <button onClick={() => setNetworkDisplayMode("graph")} style={{ flex: 1, padding: "4px", fontSize: "0.8em", border: "none", borderRadius: "2px", cursor: "pointer", background: networkDisplayMode === "graph" ? "var(--text-main)" : "transparent", color: networkDisplayMode === "graph" ? "var(--bg-panel)" : "var(--text-muted)" }}>🕸️ グラフ</button>
+                  <button onClick={() => setNetworkDisplayMode("list")} style={{ flex: 1, padding: "4px", fontSize: "0.8em", border: "none", borderRadius: "2px", cursor: "pointer", background: networkDisplayMode === "list" ? "var(--text-main)" : "transparent", color: networkDisplayMode === "list" ? "var(--bg-panel)" : "var(--text-muted)" }}>📂 リスト</button>
+                </div>
                 <div style={{ fontWeight: "bold", marginBottom: "8px" }}>🕸️ 引用ネットワーク</div>
                 <div style={{ color: "var(--text-muted)", fontSize: "0.85em", lineHeight: "1.5", marginBottom: "12px" }}>
                   既読: {globalGraph.nodes.filter((n: any) => n.type === "loaded").length} / 未読: {globalGraph.nodes.filter((n: any) => n.type === "unloaded").length}
@@ -1821,8 +2127,50 @@ async function onDocumentLoadSuccess(pdf: any) {
                 </div>
               </div>
 
+              {/* 🌟 追加: フィルター＆ソート コントロールパネル */}
+              <div style={{ flex: "0 0 auto", display: "flex", flexDirection: "column", gap: "8px", background: "var(--bg-panel)", borderRadius: "var(--radius-md)", boxShadow: "var(--shadow-sm)", border: "1px solid var(--border-light)", padding: "10px 12px" }}>
+                
+                <div style={{ display: "flex", gap: "4px" }}>
+                  <span style={{ fontSize: "0.75em", color: "var(--text-muted)", width: "40px", display: "flex", alignItems: "center", fontWeight: "bold" }}>状態</span>
+                  <div style={{ display: "flex", flex: 1, background: "var(--bg-hover)", borderRadius: "4px", padding: "2px", border: "1px solid var(--border-light)" }}>
+                    {["all", "unchecked", "checked", "oa_open"].map(mode => (
+                      <button 
+                        key={mode} 
+                        onClick={() => setFilterStatus(mode as any)}
+                        style={{ flex: 1, padding: "2px 0", fontSize: "0.7em", border: "none", borderRadius: "2px", cursor: "pointer", fontWeight: filterStatus === mode ? "bold" : "normal", background: filterStatus === mode ? "var(--text-main)" : "transparent", color: filterStatus === mode ? "var(--bg-panel)" : "var(--text-muted)" }}
+                      >
+                        {mode === "all" ? "全て" : mode === "unchecked" ? "未確認" : mode === "checked" ? "確認済" : "🔓OA"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", gap: "4px" }}>
+                  <span style={{ fontSize: "0.75em", color: "var(--text-muted)", width: "40px", display: "flex", alignItems: "center", fontWeight: "bold" }}>種類</span>
+                  <div style={{ display: "flex", flex: 1, background: "var(--bg-hover)", borderRadius: "4px", padding: "2px", border: "1px solid var(--border-light)" }}>
+                    {["all", "pdf", "web"].map(type => (
+                      <button 
+                        key={type} 
+                        onClick={() => setFilterType(type as any)}
+                        style={{ flex: 1, padding: "2px 0", fontSize: "0.7em", border: "none", borderRadius: "2px", cursor: "pointer", fontWeight: filterType === type ? "bold" : "normal", background: filterType === type ? "var(--text-main)" : "transparent", color: filterType === type ? "var(--bg-panel)" : "var(--text-muted)" }}
+                      >
+                        {type === "all" ? "全て" : type === "pdf" ? "📄PDF" : "🌐Web"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", gap: "4px", opacity: networkDisplayMode === "list" ? 1 : 0.4, pointerEvents: networkDisplayMode === "list" ? "auto" : "none" }}>
+                  <span style={{ fontSize: "0.75em", color: "var(--text-muted)", width: "40px", display: "flex", alignItems: "center", fontWeight: "bold" }}>順序</span>
+                  <div style={{ display: "flex", flex: 1, background: "var(--bg-hover)", borderRadius: "4px", padding: "2px", border: "1px solid var(--border-light)" }}>
+                    <button onClick={() => setSortBy("citation")} style={{ flex: 1, padding: "2px 0", fontSize: "0.7em", border: "none", borderRadius: "2px", cursor: "pointer", background: sortBy === "citation" ? "var(--text-main)" : "transparent", color: sortBy === "citation" ? "var(--bg-panel)" : "var(--text-muted)" }}>⬇️引用数</button>
+                    <button onClick={() => setSortBy("title")} style={{ flex: 1, padding: "2px 0", fontSize: "0.7em", border: "none", borderRadius: "2px", cursor: "pointer", background: sortBy === "title" ? "var(--text-main)" : "transparent", color: sortBy === "title" ? "var(--bg-panel)" : "var(--text-muted)" }}>🔤タイトル</button>
+                  </div>
+                </div>
+              </div>
+
               {/* 手持ちのPDFリスト */}
-              <div style={{ display: "flex", flexDirection: "column", background: "var(--bg-panel)", borderRadius: "var(--radius-md)", boxShadow: "var(--shadow-sm)", border: "1px solid var(--border-light)", overflow: "hidden", maxHeight: "30%" }}>
+              <div style={{ flex: "0 1 30%", display: "flex", flexDirection: "column", background: "var(--bg-panel)", borderRadius: "var(--radius-md)", boxShadow: "var(--shadow-sm)", border: "1px solid var(--border-light)", overflow: "hidden", minHeight: "120px" }}>
                 <div style={{ padding: "8px 12px", background: "var(--bg-hover)", fontSize: "0.8em", fontWeight: "bold", borderBottom: "1px solid var(--border-light)" }}>📚 手持ちのPDF</div>
                 <div style={{ overflowY: "auto", padding: "4px" }}>
                   {globalGraph.nodes.filter((n: any) => n.type === "loaded").map((node: any) => (
@@ -1832,11 +2180,19 @@ async function onDocumentLoadSuccess(pdf: any) {
                       {/* 🌟 2段階削除 ＆ キャンセルボタン */}
                       <div style={{ display: "flex", gap: "2px", alignItems: "center" }}>
                         <button 
-                          onClick={(e) => { e.stopPropagation(); handleSwitchPdf(node); }}
-                          style={{ background: "transparent", border: "none", color: "#10b981", cursor: "pointer", padding: "2px 6px", borderRadius: "4px", fontWeight: "bold", fontSize: "1.1em" }}
-                          title="Readerで開く"
+                          onClick={(e) => { 
+                            e.stopPropagation(); 
+                            const targetFileName = node.fileName || node.id;
+                            if (pdfFilesMap[targetFileName]) {
+                              handleSwitchPdf(node);
+                            } else {
+                              triggerPdfUpload(node.id);
+                            }
+                          }}
+                          style={{ background: "transparent", border: "none", color: pdfFilesMap[node.fileName || node.id] ? "#10b981" : "#f59e0b", cursor: "pointer", padding: "2px 6px", borderRadius: "4px", fontWeight: "bold", fontSize: "1.1em" }}
+                          title={pdfFilesMap[node.fileName || node.id] ? "Readerで開く" : "ファイルが消失しています。クリックして再アップロード"}
                         >
-                          📖
+                          {pdfFilesMap[node.fileName || node.id] ? "📖" : "⚠️"}
                         </button>
                         <button 
                           onClick={(e) => { 
@@ -1867,7 +2223,7 @@ async function onDocumentLoadSuccess(pdf: any) {
               </div>
 
               {/* ⭐ 気になるリスト */}
-              <div style={{ display: "flex", flexDirection: "column", background: "var(--bg-panel)", borderRadius: "var(--radius-md)", boxShadow: "var(--shadow-sm)", border: "1px solid var(--border-light)", overflow: "hidden", flex: 1 }}>
+              <div style={{ flex: "1 1 0", minHeight: 0, display: "flex", flexDirection: "column", background: "var(--bg-panel)", borderRadius: "var(--radius-md)", boxShadow: "var(--shadow-sm)", border: "1px solid var(--border-light)", overflow: "hidden" }}>
                 <div style={{ padding: "8px 12px", background: "#fff9db", fontSize: "0.85em", fontWeight: "bold", color: "#854d0e", borderBottom: "1px solid var(--border-light)" }}>⭐ 気になる文献</div>
                 <div style={{ overflowY: "auto", padding: "4px" }}>
                   {globalGraph.nodes.filter((n: any) => pinnedNodeIds.includes(n.id)).map((node: any) => (
@@ -1883,57 +2239,221 @@ async function onDocumentLoadSuccess(pdf: any) {
             </div>
 
             {/* 中央：グラフ描画エリア */}
-            <div ref={containerRef} style={{ flex: 1, position: "relative", overflow: "hidden", minWidth: 0 }}>
-              <input id="network-pdf-upload" type="file" accept="application/pdf" style={{ display: "none" }} onChange={(e) => e.target.files?.[0] && handleFileUpload(e.target.files[0])} />
-              <ForceGraph2D
-                ref={fgRef}
-                width={graphDim.width}
-                height={graphDim.height}
-                graphData={globalGraph}
-                onNodeClick={handleNodeClick}
-                backgroundColor="transparent"
-                d3VelocityDecay={0.2}
-                nodeCanvasObject={(node: any, ctx, globalScale) => {
-                  const isSelected = selectedNode?.id === node.id;
-                  const isPinned = pinnedNodeIds.includes(node.id);
-                  const radius = Math.sqrt(node.val || 5) * 2;
-                  
-                  if (isSelected || isPinned) {
-                    ctx.beginPath();
-                    ctx.arc(node.x, node.y, radius + (isPinned ? 5 : 3), 0, 2 * Math.PI, false);
-                    ctx.fillStyle = isPinned ? "rgba(255, 215, 0, 0.4)" : "rgba(255, 240, 138, 0.5)";
-                    ctx.fill();
-                    if (isPinned) {
-                      ctx.strokeStyle = "#ffd700";
-                      ctx.lineWidth = 2 / globalScale;
+            {/* 🌟 修正: 中央エリア全体を Flex Column で縦に分割するコンテナ */}
+            <div style={{ flex: 1, display: "flex", flexDirection: "column", position: "relative", overflow: "hidden", minWidth: 0 }}>
+              
+              {/* 🔼 上半分：グラフ描画 ＆ リストエリア */}
+              <div ref={containerRef} style={{ flex: 1, position: "relative", overflow: "hidden", minWidth: 0 }}>
+                <input id="network-pdf-upload" type="file" accept="application/pdf" style={{ display: "none" }} onChange={(e) => e.target.files?.[0] && handleFileUpload(e.target.files[0])} />
+                {networkDisplayMode === "graph" ? (
+                  globalGraph.nodes.length > 0 ? (
+                <ForceGraph2D
+                  ref={fgRef}
+                  width={graphDim.width}
+                  height={graphDim.height}
+                  graphData={{
+                    nodes: getProcessedNodes(globalGraph.nodes),
+                    links: globalGraph.links.filter((l: any) => {
+                      const validNodeIds = new Set(getProcessedNodes(globalGraph.nodes).map(n => n.id));
+                      const sId = typeof l.source === 'object' ? l.source.id : l.source;
+                      const tId = typeof l.target === 'object' ? l.target.id : l.target;
+                      return validNodeIds.has(sId) && validNodeIds.has(tId);
+                    })
+                  }}
+                  onNodeClick={handleNodeClick}
+                  backgroundColor="transparent"
+                  d3VelocityDecay={0.8}
+                  nodeCanvasObject={(node: any, ctx, globalScale) => {
+                    const isSelected = selectedNode?.id === node.id;
+                    const isPinned = pinnedNodeIds.includes(node.id);
+                    const isHighlighted = highlightedNodes.some(hId => node.id === hId || node.id.startsWith(hId) || hId.startsWith(node.id));
+                    const radius = Math.sqrt(node.val || 5) * 2;
+                    
+                    if (isHighlighted) {
+                      ctx.beginPath();
+                      ctx.arc(node.x, node.y, radius + 15, 0, 2 * Math.PI, false);
+                      ctx.fillStyle = "rgba(245, 158, 11, 0.2)"; // 金色のオーラ
+                      ctx.fill();
+                      
+                      ctx.beginPath();
+                      ctx.arc(node.x, node.y, radius + 5, 0, 2 * Math.PI, false);
+                      ctx.strokeStyle = "rgba(245, 158, 11, 0.8)"; // 強い金色の枠線
+                      ctx.lineWidth = 4 / globalScale;
                       ctx.stroke();
                     }
-                  }
 
-                  ctx.beginPath();
-                  ctx.arc(node.x, node.y, radius, 0, 2 * Math.PI, false);
-                  ctx.fillStyle = node.group ? node.group : (node.type === "loaded" ? "#1976d2" : "#d1d5db");
-                  ctx.fill();
+                    if (isSelected || isPinned) {
+                      ctx.beginPath();
+                      ctx.arc(node.x, node.y, radius + (isPinned ? 5 : 3), 0, 2 * Math.PI, false);
+                      ctx.fillStyle = isPinned ? "rgba(255, 215, 0, 0.4)" : "rgba(255, 240, 138, 0.5)";
+                      ctx.fill();
+                      if (isPinned) {
+                        ctx.strokeStyle = "#ffd700";
+                        ctx.lineWidth = 2 / globalScale;
+                        ctx.stroke();
+                      }
+                    }
 
-                  if (globalScale > 0.3) {
-                    const label = node.title || "";
-                    const fontSize = 13 / globalScale; 
-                    ctx.font = `${(isSelected || isPinned) ? 'bold ' : ''}${fontSize}px Sans-Serif`;
-                    ctx.textAlign = 'center';
-                    ctx.textBaseline = 'top';
-                    const shortLabel = label.length > 20 ? label.substring(0, 20) + "..." : label;
-                    const textY = node.y + radius + (3 / globalScale);
-                    ctx.lineWidth = 3 / globalScale;
-                    ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
-                    ctx.strokeText(shortLabel, node.x, textY);
-                    if (isPinned) ctx.fillStyle = "#854d0e";
-                    else if (isSelected) ctx.fillStyle = "#e65100";
-                    else ctx.fillStyle = node.type === "loaded" ? "#1f2937" : "#6b7280";
-                    ctx.fillText(shortLabel, node.x, textY);
-                  }
-                }}
-                nodeCanvasObjectMode={() => "replace"}
-              />
+                    ctx.beginPath();
+                    ctx.arc(node.x, node.y, radius, 0, 2 * Math.PI, false);
+                    
+                    // 色分けロジック
+                    if (node.type === "loaded") {
+                      ctx.fillStyle = "#1976d2";
+                    } else if (node.oaStatus === "open") {
+                      ctx.fillStyle = node.docType === "pdf" ? "#10b981" : "#0ea5e9";
+                    } else if (node.oaStatus === "checked") {
+                      ctx.fillStyle = "#f59e0b";
+                    } else {
+                      ctx.fillStyle = "#d1d5db";
+                    }
+                    ctx.fill();
+
+                    if (globalScale > 0.3) {
+                      const label = node.title || "";
+                      const fontSize = 13 / globalScale; 
+                      ctx.font = `${(isSelected || isPinned) ? 'bold ' : ''}${fontSize}px Sans-Serif`;
+                      ctx.textAlign = 'center';
+                      ctx.textBaseline = 'top';
+                      const shortLabel = label.length > 20 ? label.substring(0, 20) + "..." : label;
+                      const textY = node.y + radius + (3 / globalScale);
+                      ctx.lineWidth = 3 / globalScale;
+                      ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
+                      ctx.strokeText(shortLabel, node.x, textY);
+                      if (isPinned) ctx.fillStyle = "#854d0e";
+                      else if (isSelected) ctx.fillStyle = "#e65100";
+                      else ctx.fillStyle = node.type === "loaded" ? "#1f2937" : "#6b7280";
+                      ctx.fillText(shortLabel, node.x, textY);
+                    }
+                  }}
+                  nodeCanvasObjectMode={() => "replace"}
+                />
+                ) : (
+                    <div style={{ display: "flex", justifyContent: "center", alignItems: "center", height: "100%", color: "var(--text-muted)" }}>
+                      PDFをアップロードすると、ここに引用ネットワークが形成されます。
+                    </div>
+                  )
+                ) : (
+                  renderNestedList()
+                )}
+              </div>
+
+              {/* 🔽 下半分：コマンドバー ＆ グローバルチャットエリア */}
+              {/* 🌟 修正: サイドバー（300px）を避けるために paddingLeft を確保する */}
+              <div style={{
+                height: isGlobalChatOpen ? "40%" : "64px",
+                display: "flex",
+                flexDirection: "column",
+                background: "var(--bg-panel)",
+                borderTop: "1px solid var(--border-light)",
+                boxShadow: "0 -4px 15px rgba(0,0,0,0.05)",
+                transition: "height 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
+                paddingLeft: "310px", // 👈 左の絶対配置サイドバーを避けるための重要なパディング
+                zIndex: 5
+              }}>
+                
+                {/* 開いている時だけ見えるチャット履歴エリア */}
+                <div style={{ flex: 1, overflowY: "auto", padding: "16px 24px", display: isGlobalChatOpen ? "flex" : "none", flexDirection: "column", gap: "16px", background: "var(--bg-app)" }}>
+                  {globalMessages.length === 0 ? (
+                    <div style={{ textAlign: "center", color: "var(--text-muted)", marginTop: "30px", display: "flex", flexDirection: "column", alignItems: "center", gap: "10px" }}>
+                      <span style={{ fontSize: "2.5em" }}>🌌</span>
+                      <div style={{ fontWeight: "bold", fontSize: "1.1em", color: "var(--text-main)" }}>Library Agent (Sui) へのアクセス</div>
+                      <p style={{ fontSize: "0.9em", maxWidth: "400px", lineHeight: "1.6" }}>
+                        現在展開されているネットワーク全体から、必要な知識を検索・推論します。まだ実体化していない未読ノードの有望性についても提案可能です。
+                      </p>
+                      <div style={{ background: "var(--bg-panel)", padding: "10px 16px", borderRadius: "8px", border: "1px solid var(--border-light)", fontSize: "0.85em", marginTop: "10px" }}>
+                        💡 <b>例:</b> 「コロイドの粘度についてまとまっている文献はどれ？」
+                      </div>
+                    </div>
+                  ) : (
+                    globalMessages.map((msg) => (
+                      <div key={msg.id} style={{ display: "flex", flexDirection: "column", alignItems: msg.role === "user" ? "flex-end" : "flex-start", marginBottom: "8px" }}>
+                        <div style={{ maxWidth: "85%", background: msg.role === "user" ? "var(--bg-hover)" : "var(--bg-panel)", padding: "12px 16px", borderRadius: "var(--radius-md)", border: msg.role === "user" ? "none" : "1px solid var(--border-light)", color: "var(--text-main)" }}>
+                          <div style={{ fontSize: "0.95em", lineHeight: "1.6", overflowX: "auto", maxWidth: "100%" }}>
+                            {/* 🌟 修正: マークダウン描画時に [node:ID] を検知してクリックできるボタンに変換する */}
+                            <ReactMarkdown 
+                              remarkPlugins={[remarkBreaks]}
+                              components={{
+                                a: ({ node, href, children, ...props }) => {
+                                  if (href?.startsWith("#node-")) {
+                                    const nodeId = href.replace("#node-", "");
+                                    return (
+                                      <button
+                                        onClick={() => {
+                                          const targetNode = globalGraph.nodes.find((n: any) => n.id === nodeId || n.id.startsWith(nodeId) || nodeId.startsWith(n.id));
+                                          if (targetNode) handleFocusNode(targetNode);
+                                        }}
+                                        style={{ background: "rgba(245, 158, 11, 0.1)", color: "#d97706", border: "1px solid rgba(245, 158, 11, 0.4)", borderRadius: "4px", padding: "0 6px", cursor: "pointer", fontWeight: "bold", fontSize: "0.9em", transition: "all 0.2s" }}
+                                        onMouseEnter={e => e.currentTarget.style.background = "rgba(245, 158, 11, 0.2)"}
+                                        onMouseLeave={e => e.currentTarget.style.background = "rgba(245, 158, 11, 0.1)"}
+                                      >
+                                        📄 文献を見る
+                                      </button>
+                                    );
+                                  }
+                                  return <a href={href} {...props}>{children}</a>;
+                                }
+                              }}
+                            >
+                              {/* 正規表現で [node:ID] を一時的にマークダウンリンク [ID](#node-ID) に置換して渡す */}
+                              {msg.content.replace(/\[node:(.*?)\]/g, '[$1](#node-$1)')}
+                            </ReactMarkdown>
+                          </div>
+                        </div>
+                      </div>                        
+                    ))
+                  )}
+                </div>
+
+                {/* 常に表示されるコマンド入力バー */}
+                <div style={{ padding: "10px 24px", display: "flex", alignItems: "center", gap: "12px", background: "var(--bg-panel)", flexShrink: 0 }}>
+                  <button
+                    onClick={() => setIsGlobalChatOpen(!isGlobalChatOpen)}
+                    style={{ background: "transparent", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: "1.2em", transform: isGlobalChatOpen ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.3s, color 0.2s", display: "flex", alignItems: "center", justifyContent: "center", width: "32px", height: "32px", borderRadius: "50%" }}
+                    onMouseEnter={e => e.currentTarget.style.color = "var(--text-main)"}
+                    onMouseLeave={e => e.currentTarget.style.color = "var(--text-muted)"}
+                    title="履歴を開閉"
+                  >
+                    ▲
+                  </button>
+                  <div style={{ flex: 1, display: "flex", alignItems: "center", background: "var(--bg-app)", borderRadius: "24px", padding: "8px 20px", border: "1px solid var(--border-light)", boxShadow: "inset 0 1px 4px rgba(0,0,0,0.03)", transition: "border 0.2s" }}
+                       onFocus={e => e.currentTarget.style.borderColor = "#9ca3af"}
+                       onBlur={e => e.currentTarget.style.borderColor = "var(--border-light)"}
+                  >
+                    <span style={{ marginRight: "12px", fontSize: "1.2em", opacity: 0.8 }}>✨</span>
+                    <input
+                      type="text"
+                      placeholder="ライブラリ全体から情報を検索、または Sui に指示..."
+                      value={globalInputText}
+                      onChange={(e) => setGlobalInputText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && globalInputText.trim()) {
+                          e.preventDefault();
+                          setIsGlobalChatOpen(true);
+                          askLibraryAgent(globalInputText);
+                        }
+                      }}
+                      disabled={isLoading}
+                      style={{ flex: 1, border: "none", outline: "none", background: "transparent", color: "var(--text-main)", fontSize: "0.95em" }}
+                    />
+                  </div>
+                  <button
+                    onClick={() => {
+                      if(globalInputText.trim()){
+                        setIsGlobalChatOpen(true);
+                        // TODO: バックエンド送信処理
+                        console.log("送信:", globalInputText);
+                        setGlobalInputText("");
+                      } else {
+                        setIsGlobalChatOpen(!isGlobalChatOpen);
+                      }
+                    }}
+                    style={{ padding: "8px 20px", background: globalInputText.trim() ? "var(--text-main)" : "var(--bg-hover)", color: globalInputText.trim() ? "var(--bg-panel)" : "var(--text-muted)", border: "none", borderRadius: "24px", fontWeight: "bold", cursor: "pointer", transition: "all 0.2s" }}
+                  >
+                    {globalInputText.trim() ? "送信" : "履歴"}
+                  </button>
+                </div>
+              </div>
             </div>
 
             {/* 右側：詳細パネル */}
@@ -1965,16 +2485,40 @@ async function onDocumentLoadSuccess(pdf: any) {
                       <button onClick={() => triggerPdfUpload(selectedNode.id)} style={{ width: "100%", padding: "10px", background: "var(--text-main)", color: "var(--bg-panel)", fontWeight: "bold", border: "none", borderRadius: "4px", cursor: "pointer", marginBottom: "12px" }}>📄 ローカルのPDFで実体化する</button>
                       <div style={{ height: "1px", background: "var(--border-light)", margin: "16px 0" }}></div>
                       <h4 style={{ margin: "0 0 12px 0", fontSize: "0.85em", color: "var(--text-muted)", textTransform: "uppercase" }}>ウェブ検索</h4>
-                      {!nodeOaInfo && !isFetchingOa && (
-                        <button onClick={handleCheckNodeOa} style={{ width: "100%", padding: "8px", background: "transparent", color: "var(--text-main)", border: "1px solid var(--border-light)", borderRadius: "var(--radius-sm)", cursor: "pointer" }}>🔍 無料PDFを探す</button>
+                      
+                      {/* 🌟 修正: 過去のデータ(URLなし)でスタックしないよう、常に再検索ボタンを出す */}
+                      {!isFetchingOa && (
+                        <button onClick={handleCheckNodeOa} style={{ width: "100%", padding: "8px", background: "transparent", color: "var(--text-main)", border: "1px solid var(--border-light)", borderRadius: "var(--radius-sm)", cursor: "pointer", marginBottom: nodeOaInfo ? "12px" : "0", transition: "background 0.2s" }} onMouseEnter={(e) => e.currentTarget.style.background = "var(--bg-hover)"} onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>
+                          {nodeOaInfo ? "🔄 もう一度検索する" : "🔍 無料PDFを探す"}
+                        </button>
                       )}
-                      {isFetchingOa && <div style={{ textAlign: "center", fontSize: "0.9em" }}>検索中...</div>}
+                      
+                      {isFetchingOa && <div style={{ textAlign: "center", fontSize: "0.9em", padding: "8px 0", color: "var(--text-muted)" }}>検索中...</div>}
+                      
                       {nodeOaInfo && (
                         <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                          <div style={{ padding: "4px 8px", borderRadius: "4px", fontSize: "0.85em", fontWeight: "bold", background: "#DBEAFE", color: "#1E40AF" }}>{nodeOaInfo.status}</div>
+                          {/* ステータスバッジ */}
+                          <div style={{ padding: "4px 8px", borderRadius: "4px", fontSize: "0.85em", fontWeight: "bold", background: nodeOaInfo.color === "gray" ? "#F3F4F6" : "#DBEAFE", color: nodeOaInfo.color === "gray" ? "#4B5563" : "#1E40AF" }}>
+                            {nodeOaInfo.status}
+                          </div>
+                          
+                          {/* 🌟 URLがあれば各種ジャンプボタンを表示 (CiNiiも追加) */}
                           <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
-                            {nodeOaInfo.url && <button onClick={(e) => handleOpenLink(e, nodeOaInfo.url)} style={{ flex: 1, padding: "6px", background: "#1976d2", color: "white", border: "none", borderRadius: "4px" }}>📥 開く</button>}
-                            {nodeOaInfo.scholar_url && <button onClick={(e) => handleOpenLink(e, nodeOaInfo.scholar_url)} style={{ flex: 1, padding: "6px", background: "white", border: "1px solid var(--border-light)", borderRadius: "4px" }}>🎓 Scholar</button>}
+                            {nodeOaInfo.url && (
+                              <button onClick={(e) => handleOpenLink(e, nodeOaInfo.url)} style={{ flex: 1, padding: "6px", background: "#1976d2", color: "white", border: "none", borderRadius: "4px", fontWeight: "bold", cursor: "pointer" }}>
+                                📥 開く
+                              </button>
+                            )}
+                            {nodeOaInfo.scholar_url && (
+                              <button onClick={(e) => handleOpenLink(e, nodeOaInfo.scholar_url)} style={{ flex: 1, padding: "6px", background: "white", color: "var(--text-main)", border: "1px solid var(--border-light)", borderRadius: "4px", fontWeight: "bold", cursor: "pointer" }}>
+                                🎓 Scholar
+                              </button>
+                            )}
+                            {nodeOaInfo.cinii_url && (
+                              <button onClick={(e) => handleOpenLink(e, nodeOaInfo.cinii_url)} style={{ flex: 1, padding: "6px", background: "white", color: "var(--text-main)", border: "1px solid var(--border-light)", borderRadius: "4px", fontWeight: "bold", cursor: "pointer" }}>
+                                📚 CiNii
+                              </button>
+                            )}
                           </div>
                         </div>
                       )}
@@ -1985,12 +2529,19 @@ async function onDocumentLoadSuccess(pdf: any) {
                     <>
                     <div style={{ marginTop: "20px", padding: "12px", border: "1px solid #10b981", borderRadius: "8px", background: "rgba(16, 185, 129, 0.05)", marginBottom: "12px" }}>
                         <button 
-                          onClick={() => handleSwitchPdf(selectedNode)}
-                          style={{ width: "100%", padding: "10px", background: "#10b981", color: "white", border: "none", borderRadius: "4px", cursor: "pointer", fontSize: "0.9em", fontWeight: "bold", transition: "opacity 0.2s" }}
+                          onClick={() => {
+                            const targetFileName = selectedNode.fileName || selectedNode.id;
+                            if (pdfFilesMap[targetFileName]) {
+                              handleSwitchPdf(selectedNode);
+                            } else {
+                              triggerPdfUpload(selectedNode.id);
+                            }
+                          }}
+                          style={{ width: "100%", padding: "10px", background: pdfFilesMap[selectedNode.fileName || selectedNode.id] ? "#10b981" : "#f59e0b", color: "white", border: "none", borderRadius: "4px", cursor: "pointer", fontSize: "0.9em", fontWeight: "bold", transition: "opacity 0.2s" }}
                           onMouseEnter={(e) => e.currentTarget.style.opacity = "0.8"}
                           onMouseLeave={(e) => e.currentTarget.style.opacity = "1"}
                         >
-                          📖 このPDFをReaderで開く
+                          {pdfFilesMap[selectedNode.fileName || selectedNode.id] ? "📖 このPDFをReaderで開く" : "⚠️ メモリ消失: クリックしてPDFを復元"}
                         </button>
                       </div>
                     <div style={{ marginTop: "20px", padding: "12px", border: "1px solid #fee2e2", borderRadius: "8px", background: "rgba(239, 68, 68, 0.05)", display: "flex", flexDirection: "column", gap: "8px" }}>
