@@ -53,7 +53,8 @@ class AppState(TypedDict):
 # ==========================================
 def route_task(state: AppState) -> str:
     # 🌟 画像があって、かつOCRがまだ終わっていなければ、問答無用でOCRへ回送
-    if state.get("raw_image") and not state.get("extracted_text"):
+    # OCRが空文字を返した場合も「完了」とみなす（再度OCRNodeへ回すとグラフに分岐先がなく落ちる）
+    if state.get("raw_image") and state.get("extracted_text") is None:
         print("🧭 [Supervisor] 未解析の画像を検知。 -> OCR Agent へ回送")
         return "OCRNode"
     

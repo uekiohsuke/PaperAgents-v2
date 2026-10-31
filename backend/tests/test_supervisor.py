@@ -54,11 +54,11 @@ def test_graph_qa(fake_llm):
     assert result["qa_answer"] == "こたえ"
 
 
-@pytest.mark.xfail(reason="OCRが空文字を返すと route_task が 'OCRNode' を返すが、OCRNode からの分岐先に存在しない", strict=True)
 def test_graph_ocr_empty_result(fake_llm):
     fake_llm(ocr_agent, "", attr="vlm")
     fake_llm(qa_agent, "[回答]\nx\n[辞書データ]\n{}")
-    supervisor.app_graph.invoke(base_state(intent="qa", raw_image="xx"))
+    result = supervisor.app_graph.invoke(base_state(intent="qa", raw_image="xx"))
+    assert result["extracted_text"] == "" and result["qa_answer"] == "x"
 
 
 def test_code_fix_request_sees_previous_code(fake_llm):
