@@ -110,7 +110,6 @@ def test_oa_status_extraction_error(fake_llm):
     assert citation_agent.get_oa_status_from_text("x")["status"] == "Error"
 
 
-@pytest.mark.xfail(reason="lru_cache が返す dict を呼び出し側が書き換えるため、キャッシュ値が汚染される", strict=True)
 def test_cached_result_not_mutated(fake_llm, fake_http):
     fake_http({"crossref": FakeResponse(500)})
     fake_llm(citation_agent, '{"title": "Paper", "authors": "", "type": "paper", "url": null}')
@@ -143,9 +142,10 @@ def test_citation_node_website_skips_api(fake_llm, fake_http):
     assert calls == []
 
 
-@pytest.mark.xfail(reason="抽出失敗時のフォールバックが raw_text を使うため、画像経由(raw_text=None)だと quote(None) で落ちる", strict=True)
 def test_citation_node_extraction_failure_from_image(fake_llm, fake_http):
-    fake_http({"crossref": FakeResponse(500)})
+    calls = fake_http({"crossref": FakeResponse(500)})
     fake_llm(citation_agent, "not json", "解説")
-    citation_agent.citation_agent_node({"raw_text": None, "extracted_text": "Perrin 1909",
+    out = citation_agent.citation_agent_node({"raw_text": None, "extracted_text": "Perrin 1909",
                                         "selected_citation": "", "current_context": ""})
+    assert "Perrin%201909" in calls[0]
+    assert out["relevance_explanation"] == "解説"

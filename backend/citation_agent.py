@@ -1,4 +1,4 @@
-import os, re
+import os, re, copy
 import requests
 import urllib.parse
 from functools import lru_cache
@@ -53,8 +53,12 @@ def generate_fallback(color: str, title: str, status_msg: str, abstract: str = "
         "doi": doi, "abstract": abstract, "message": f"{message}以下のリンクから手動で検索してください。"
     }
 
-@lru_cache(maxsize=100)
 def check_paper_availability_keyless(query_title: str, query_authors: str = ""):
+    # 呼び出し側が結果にタイトル等を書き足すため、キャッシュ本体ではなくコピーを返す
+    return copy.deepcopy(_check_paper_availability_cached(query_title, query_authors))
+
+@lru_cache(maxsize=100)
+def _check_paper_availability_cached(query_title: str, query_authors: str = ""):
     print(f"🔍 APIツール実行中 (Crossref): {query_title[:30]}...")
     crossref_url = f"https://api.crossref.org/works?query.title={urllib.parse.quote(query_title)}"
     if query_authors:
@@ -98,6 +102,8 @@ def check_paper_availability_keyless(query_title: str, query_authors: str = ""):
     except Exception as e:
         print(f"⚠️ 通信エラー: {e}")
         return generate_fallback("gray", query_title, "通信タイムアウト")
+
+check_paper_availability_keyless.cache_clear = _check_paper_availability_cached.cache_clear
 
 # ==========================================
 # ネットワークグラフ用 APIツール (Semantic Scholar)
@@ -298,7 +304,8 @@ def citation_agent_node(state: CitationState):
         print(f"✨ 抽出成功: {extracted_data['title']} (著者: {extracted_data['authors']}) [Type: {extracted_data['type']}]")
     except Exception as e:
         print(f"⚠️ 抽出失敗（フォールバック）: {e}")
-        extracted_data = {"title": state.get("raw_text"), "authors": "", "type": "paper", "url": None}
+        # 画像経由では raw_text が None のため、実際に解析したテキストをタイトルとして使う
+        extracted_data = {"title": target_reference_text, "authors": "", "type": "paper", "url": None}
 
     paper_info = {}
     
@@ -328,8 +335,8 @@ def citation_agent_node(state: CitationState):
     print(f"🧠 関連性推論の開始...")
     chain_citation = prompt_citation | llm
     response = chain_citation.invoke({
-        "selected_citation": state["selected_citation"],
-        "current_context": state["current_context"],
+        "selected_citation": state.get("selected_citation", ""),
+        "current_context": state.get("current_context", ""),
         "title": paper_info.get("title", ""),
         "abstract": paper_info.get("abstract", "要約データなし")
     })
