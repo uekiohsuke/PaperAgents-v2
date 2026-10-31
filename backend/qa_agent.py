@@ -37,6 +37,24 @@ INTENT_INSTRUCTIONS = {
 }
 
 # ==========================================
+# [辞書データ] セクションから JSON だけを取り出す
+# ==========================================
+EMPTY_DICT_JSON = '{"terms": [], "variables": []}'
+
+def extract_dict_json(dict_part: str) -> str:
+    """LLMが ```json の囲みや前後の説明文を付けても、フロントが JSON.parse できる文字列にする"""
+    start = dict_part.find("{")
+    if start == -1:
+        return EMPTY_DICT_JSON
+    try:
+        data, _ = json.JSONDecoder().raw_decode(dict_part[start:])
+    except json.JSONDecodeError:
+        return EMPTY_DICT_JSON
+    if not isinstance(data, dict):
+        return EMPTY_DICT_JSON
+    return json.dumps(data, ensure_ascii=False)
+
+# ==========================================
 # プロンプトの定義（辞書抽出の改良版）
 # ==========================================
 # 履歴をLangChainのメッセージオブジェクトに変換
@@ -95,7 +113,7 @@ def qa_agent_node(state: QAState):
         try:
             answer_part, dict_part = raw_output.split("[辞書データ]")
             answer_text = answer_part.replace("[回答]", "").strip()
-            dict_json_str = dict_part.strip()
+            dict_json_str = extract_dict_json(dict_part)
         except ValueError:
             # [辞書データ] まで届かなかった（上限で翻訳の途中で切れた場合を含む）
             answer_text = raw_output.replace("[回答]", "").strip() + truncation_notice(response)
@@ -205,7 +223,7 @@ def qa_agent_node(state: QAState):
     try:
         answer_part, dict_part = raw_output.split("[辞書データ]")
         answer_text = answer_part.replace("[回答]", "").strip()
-        dict_json_str = dict_part.strip()
+        dict_json_str = extract_dict_json(dict_part)
     except ValueError:
         # [辞書データ] まで届かなかった（上限で回答の途中で切れた場合を含む）
         answer_text = raw_output.replace("[回答]", "").strip() + truncation_notice(response)

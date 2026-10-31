@@ -1,3 +1,4 @@
+import json
 import pytest
 import qa_agent
 import math_agent
@@ -51,6 +52,19 @@ def test_qa_translate_mode(fake_llm):
     fake_llm(qa_agent, '[回答]\n翻訳文\n[辞書データ]\n{"terms": []}')
     out = qa_agent.qa_agent_node({"user_intent": "translate", "raw_text": "Hello"})
     assert out == {"qa_answer": "翻訳文", "dict_suggestions": '{"terms": []}'}
+
+
+@pytest.mark.parametrize("dict_part,expected", [
+    ('```json\n{"terms": [{"term": "粘度", "description": "流れにくさ"}]}\n```', {"terms": [{"term": "粘度", "description": "流れにくさ"}]}),
+    ('以下が辞書です。\n{"terms": [], "variables": []}\n以上です。', {"terms": [], "variables": []}),
+    ('{"terms": [', {"terms": [], "variables": []}),  # 上限で途中で切れたJSON
+    ("辞書はありません", {"terms": [], "variables": []}),
+    ('["a"]', {"terms": [], "variables": []}),
+])
+def test_translate_dict_is_always_valid_json(fake_llm, dict_part, expected):
+    fake_llm(qa_agent, f"[回答]\n翻訳文\n[辞書データ]\n{dict_part}")
+    out = qa_agent.qa_agent_node({"user_intent": "translate", "raw_text": "Hello"})
+    assert json.loads(out["dict_suggestions"]) == expected
 
 
 def test_qa_thread_summary_mode(fake_llm):

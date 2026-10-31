@@ -1372,7 +1372,13 @@ const askLibraryAgent = async (text: string) => {
                   const latestAiMsg = currentThread?.messages.find(m => m.id === aiMsgId);
                   
                   if (latestAiMsg) {
-                    const suggestions = JSON.parse(data.dict_suggestions || "{\"terms\":[]}");
+                    let suggestions: any = { terms: [] };
+                    try {
+                      suggestions = JSON.parse(data.dict_suggestions || "{\"terms\":[]}");
+                    } catch (error) {
+                      // 辞書が壊れていても翻訳結果は単語帳に残す
+                      console.error("辞書データの解析エラー:", error);
+                    }
                     
                     const newEntry: TranslationVocab = {
                       id: Date.now().toString(),
