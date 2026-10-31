@@ -49,15 +49,6 @@ def test_graph_chart_sends_image_without_ocr(fake_llm):
     assert chart.calls[0][-1].content[1]["image_url"]["url"] == "data:image/png;base64,xx"
 
 
-@pytest.mark.parametrize("vision,expected", [("vl-model", "vl-model"), ("", "text-model")])
-def test_vision_model_falls_back_to_text_model(monkeypatch, vision, expected):
-    import importlib, chart_agent
-    monkeypatch.setenv("LOCAL_OPENAI_MODEL_NAME", "text-model")
-    monkeypatch.setenv("LOCAL_OPENAI_VISION_MODEL_NAME", vision)
-    assert importlib.reload(ocr_agent).vlm.model_name == expected
-    assert importlib.reload(chart_agent).llm.model_name == expected
-
-
 def test_route_unknown_intent():
     with pytest.raises(ValueError):
         route_task({"intent": "unknown"})

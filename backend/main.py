@@ -9,6 +9,7 @@ import asyncio
 from supervisor import app_graph
 from pdf_parser import PaperParser
 from citation_agent import get_oa_status_from_text
+import llm_settings
 from fastapi import UploadFile, File
 import os
 import shutil
@@ -54,6 +55,11 @@ class OARequest(BaseModel):
 
 class ThreadSummaryRequest(BaseModel):
     messages: list[dict]
+
+class LLMSettingsUpdate(BaseModel):
+    model: Optional[str] = None
+    vision_model: Optional[str] = None  # 空文字なら通常のモデルを使う
+    max_tokens: Optional[int] = None
 
 app = FastAPI(title="Paper Agent Backend API")
 
@@ -102,6 +108,25 @@ async def summarize_thread(req: ThreadSummaryRequest):
         return {"summary": result.get("qa_answer", "要約結果が空です。")}
     except Exception as e:
         return {"summary": f"要約エラー: {str(e)}"}
+
+@app.get("/api/settings")
+def get_llm_settings():
+    return llm_settings.get_settings()
+
+@app.put("/api/settings")
+def update_llm_settings(req: LLMSettingsUpdate):
+    try:
+        return llm_settings.update_settings(req.model_dump(exclude_none=True))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/api/models")
+async def list_llm_models():
+    try:
+        return {"models": await asyncio.to_thread(llm_settings.list_models)}
+    except Exception as e:
+        # 接続先が一覧APIに対応していない場合も、フロントは手入力で設定できる
+        return {"models": [], "error": f"{type(e).__name__}: {e}"}
 
 @app.post("/api/upload")
 async def upload_pdf(file: UploadFile = File(...)):

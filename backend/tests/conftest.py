@@ -1,3 +1,9 @@
+import os
+import tempfile
+
+# 開発者がUIで保存したモデル設定を読まないよう、agent を import する前に保存先をテスト用に差し替える
+os.environ["PAPER_AGENT_SETTINGS_PATH"] = os.path.join(tempfile.mkdtemp(), "llm_settings.json")
+
 import fitz
 import pytest
 from typing import Any, List

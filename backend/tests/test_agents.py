@@ -123,13 +123,3 @@ def test_library_formats_network_info(fake_llm):
     text = llm.all_text()
     assert "粘度について" in text and "sample.pdf" in text and "Colloids" in text
 
-
-def test_empty_api_key_falls_back_to_dummy(monkeypatch):
-    """新しい openai は api_key="" を拒否するため、未設定・空文字でもダミー値で起動できること"""
-    import importlib
-    import citation_agent, code_agent, ocr_agent
-    monkeypatch.setenv("LOCAL_OPENAI_API_KEY", "")
-    for module, attr in [(qa_agent, "llm"), (math_agent, "llm"), (chart_agent, "llm"), (library_agent, "llm"),
-                         (citation_agent, "llm"), (code_agent, "llm"), (ocr_agent, "vlm")]:
-        importlib.reload(module)
-        assert getattr(module, attr).openai_api_key.get_secret_value() == "dummy"

@@ -1,18 +1,11 @@
-import os
 from typing import Dict, Any
 from langchain_core.messages import HumanMessage
-from langchain_openai import ChatOpenAI
+from llm_settings import make_llm
 from dotenv import load_dotenv
 
 load_dotenv()
 
-vlm = ChatOpenAI(
-    base_url=os.environ.get("LOCAL_OPENAI_BASE_URL", "http://127.0.0.1:1234/v1"),
-    api_key=os.environ.get("LOCAL_OPENAI_API_KEY") or "dummy",  # 空文字は新しい openai が拒否する
-    # Vision用モデルが未設定なら通常のモデルを使う
-    model=os.environ.get("LOCAL_OPENAI_VISION_MODEL_NAME") or os.environ.get("LOCAL_OPENAI_MODEL_NAME", "qwen3:14b"),
-    temperature=0.0, # 抽出タスクは完全にゼロでOK
-)
+vlm = make_llm(temperature=0.0, vision=True)  # 抽出タスクは完全にゼロでOK
 
 def ocr_agent_node(state: Dict[str, Any]) -> Dict[str, Any]:
     print("\n📷 [OCR Agent] 画像入力を検知。Markdown + LaTeX形式への変換を開始します...")

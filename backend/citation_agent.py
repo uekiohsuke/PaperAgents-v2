@@ -7,18 +7,12 @@ from langgraph.graph import StateGraph, START, END
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 from langchain_core.output_parsers import JsonOutputParser
-from langchain_openai import ChatOpenAI
+from llm_settings import make_llm
 from dotenv import load_dotenv
 
 load_dotenv()
 
-llm = ChatOpenAI(
-    base_url=os.environ.get("LOCAL_OPENAI_BASE_URL", "http://127.0.0.1:1234/v1"),
-    api_key=os.environ.get("LOCAL_OPENAI_API_KEY") or "dummy",  # 空文字は新しい openai が拒否する
-    model=os.environ.get("LOCAL_OPENAI_MODEL_NAME", "qwen3:14b"),
-    temperature=0.2,
-    # streaming=True 
-)
+llm = make_llm(temperature=0.2)
 
 EMAIL = os.environ.get("CROSSREF_EMAIL", "default@example.com")
 

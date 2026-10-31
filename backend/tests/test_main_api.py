@@ -260,3 +260,30 @@ def test_run_preview_concurrent_requests_do_not_collide(preview_env):
 
     results = [r.json() for r in asyncio.run(run_both())]
     assert results == [{"status": "success", "output": "0\n"}, {"status": "success", "output": "1\n"}]
+
+
+# ==========================================
+# モデル設定
+# ==========================================
+def test_settings_api(client, monkeypatch, tmp_path):
+    import llm_settings
+    monkeypatch.setattr(llm_settings, "SETTINGS_PATH", str(tmp_path / "s.json"))
+    monkeypatch.setattr(llm_settings, "_settings", {"model": "m", "vision_model": "", "max_tokens": 4096})
+    monkeypatch.setattr(llm_settings, "_llms", [])
+    assert client.get("/api/settings").json() == {"model": "m", "vision_model": "", "max_tokens": 4096,
+                                                  "effective_vision_model": "m"}
+    r = client.put("/api/settings", json={"vision_model": "vl", "max_tokens": 256}).json()
+    assert (r["model"], r["vision_model"], r["max_tokens"], r["effective_vision_model"]) == ("m", "vl", 256, "vl")
+    assert client.put("/api/settings", json={"max_tokens": 0}).status_code == 400
+
+
+def test_models_api(client, monkeypatch):
+    import llm_settings
+    monkeypatch.setattr(llm_settings, "list_models", lambda: ["a", "b"])
+    assert client.get("/api/models").json() == {"models": ["a", "b"]}
+
+    def down():
+        raise ConnectionError("refused")
+    monkeypatch.setattr(llm_settings, "list_models", down)
+    body = client.get("/api/models").json()
+    assert body["models"] == [] and "refused" in body["error"]
