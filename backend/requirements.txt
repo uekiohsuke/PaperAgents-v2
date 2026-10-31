@@ -1,0 +1,29 @@
+# Web API
+fastapi==0.135.1
+uvicorn==0.41.0
+python-multipart==0.0.22
+pydantic==2.12.5
+python-dotenv==1.2.2
+requests==2.32.5
+
+# PDF解析・RAG
+PyMuPDF==1.27.2
+faiss-cpu==1.13.2
+
+# LLM / エージェント
+langgraph==1.1.0
+langchain-core==1.3.2
+langchain-openai==1.1.11
+openai==2.26.0  # これより新しい版は api_key="" を拒否する（LOCAL_OPENAI_API_KEY 未設定時に起動不可）
+langchain-ollama==1.1.0
+langchain-community==0.4.1
+langchain-text-splitters==1.1.2
+
+# シミュレーションコードのプレビュー実行（/api/run_preview）
+numpy==2.4.4
+scipy==1.17.1
+matplotlib==3.10.9
+
+# テスト
+pytest
+httpx==0.28.1
