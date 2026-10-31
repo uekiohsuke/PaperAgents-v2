@@ -101,13 +101,13 @@ def test_library_rag_query_is_user_question(client, graph_spy, monkeypatch):
     assert queries == ["粘度は？"]
 
 
-@pytest.mark.xfail(reason="グラフ実行中の例外がストリームを途中で切断し、フロントにエラーイベントが届かない", strict=True)
 def test_agent_error_is_reported_in_stream(client, monkeypatch):
     def boom(state):
         raise RuntimeError("LLM down")
     monkeypatch.setattr(main.app_graph, "invoke", boom)
     resp = client.post("/api/agent", json=agent_request("qa", selected_text="s"))
-    assert "LLM down" in resp.text
+    events, _ = read_sse(resp)
+    assert events[-1]["status"] == "error" and "LLM down" in events[-1]["message"]
 
 
 def test_summarize_thread(client, graph_spy):

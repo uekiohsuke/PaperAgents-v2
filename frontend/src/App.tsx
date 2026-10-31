@@ -71,6 +71,13 @@ type ViewMode = "reader" | "network";
 
 type NetworkDisplayMode = "graph" | "list";
 
+// バックエンドがSSEで送る {status: "error"} イベントを、通信エラーと区別して表示するための例外
+const agentError = (message: string) => {
+  const error = new Error(`エージェントでエラーが発生しました: ${message}`);
+  error.name = "AgentError";
+  return error;
+};
+
 function App() {
   // PDFファイルstate
   const [pdfFile, setPdfFile] = useState<File | null>(null);
@@ -1226,6 +1233,7 @@ const askLibraryAgent = async (text: string) => {
             if (!dataStr.trim()) continue;
 
             const data = JSON.parse(dataStr);
+            if (data.status === "error") throw agentError(data.message);
             
             if (data.chunk) {
               accumulatedResponse += data.chunk;
@@ -1244,10 +1252,10 @@ const askLibraryAgent = async (text: string) => {
           }
         }
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error(error);
       setGlobalMessages(prev => prev.map(msg => 
-        msg.id === aiMsgId ? { ...msg, content: "⚠️ エラーが発生しました。" } : msg
+        msg.id === aiMsgId ? { ...msg, content: error.name === "AgentError" ? `⚠️ ${error.message}` : "⚠️ エラーが発生しました。" } : msg
       ));
     } finally {
       setIsLoading(false);
@@ -1398,6 +1406,7 @@ const askLibraryAgent = async (text: string) => {
               break; 
             }
             if (data.status === "info") continue;
+            if (data.status === "error") throw agentError(data.message);
 
             if (data.paper_info) {
               setThreads(prevThreads => prevThreads.map(thread => 
@@ -1445,7 +1454,7 @@ const askLibraryAgent = async (text: string) => {
             ? {
                 ...thread,
                 messages: thread.messages.map(msg => 
-                  msg.id === aiMsgId ? { ...msg, content: "⚠️ 通信エラーが発生しました。" } : msg
+                  msg.id === aiMsgId ? { ...msg, content: error.name === "AgentError" ? `⚠️ ${error.message}` : "⚠️ 通信エラーが発生しました。" } : msg
                 )
               }
             : thread

@@ -132,11 +132,9 @@ def get_pdf_info():
 async def run_agent(request: AgentRequest):
     print(f"\n📨 リクエスト受信: タスクタイプ [{request.task_type}]")
     
-    async def event_generator():
+    async def agent_events():
         current_context = request.context.current_context
         target_reference = request.payload.target_reference_text
-
-        yield f"data: {json.dumps({'status': 'info', 'message': '🧠 エージェントが推論中...'})}\n\n"
 
         # 🌟 修正1: pdf_parser が None じゃない時だけ get_context_around を実行する
         if request.task_type in ["qa", "math", "chart"] and (request.payload.selected_text or request.payload.selected_image):
@@ -220,6 +218,16 @@ async def run_agent(request: AgentRequest):
 
         dict_data = graph_result.get("dict_suggestions", "{}")
         yield f"data: {json.dumps({'done': True, 'dict_suggestions': dict_data})}\n\n"
+
+    async def event_generator():
+        yield f"data: {json.dumps({'status': 'info', 'message': '🧠 エージェントが推論中...'})}\n\n"
+        try:
+            async for event in agent_events():
+                yield event
+        except Exception as e:
+            # 例外でストリームを黙って切らず、フロントにエラーとして伝える
+            print(f"⚠️ エージェント実行エラー: {e}")
+            yield f"data: {json.dumps({'status': 'error', 'message': f'{type(e).__name__}: {e}', 'task_type': request.task_type})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
