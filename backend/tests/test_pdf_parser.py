@@ -1,3 +1,4 @@
+import os
 import pytest
 from pdf_parser import PaperParser
 
@@ -104,4 +105,4 @@ def test_vectorstore_search_returns_page(make_pdf, monkeypatch):
     monkeypatch.setattr(pdf_parser, "create_embeddings", lambda: DeterministicFakeEmbedding(size=16))
     p = PaperParser(make_pdf([["colloid viscosity"], ["quantum spin"]]))
     assert p.vectorstore is not None
-    assert "[参照元: p." in p.similarity_search("colloid viscosity", k=1)
+    assert p.similarity_search("colloid viscosity", k=1).startswith(f"[参照元: {os.path.basename(p.file_path)} p.1]")

@@ -9,7 +9,8 @@ import main
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setattr(main.asyncio, "sleep", _no_sleep)  # 1文字ごとの待機を省略
-    monkeypatch.setattr(main, "pdf_parser", None)
+    monkeypatch.setattr(main, "pdf_parsers", {})
+    monkeypatch.setattr(main, "last_pdf_id", None)
     return TestClient(main.app)
 
 
@@ -73,7 +74,8 @@ def test_agent_uses_backend_context_when_pdf_loaded(client, graph_spy, monkeypat
         references = {"[1]": "ref"}
         def get_context_around(self, text, window_size):
             return f"...wide {text} context..."
-    monkeypatch.setattr(main, "pdf_parser", P())
+    monkeypatch.setattr(main, "pdf_parsers", {"a.pdf": P()})
+    monkeypatch.setattr(main, "last_pdf_id", "a.pdf")
     seen = graph_spy({"qa_answer": ""})
     client.post("/api/agent", json=agent_request("qa", selected_text="sel"))
     assert seen["state"]["current_context"] == "...wide sel context..."
@@ -90,10 +92,10 @@ def test_library_rag_query_is_user_question(client, graph_spy, monkeypatch):
     class P:
         vectorstore = object()
         references = {}
-        def similarity_search(self, q):
+        def search_with_scores(self, q, k):
             queries.append(q)
-            return "hit"
-    monkeypatch.setattr(main, "pdf_parser", P())
+            return []
+    monkeypatch.setattr(main, "pdf_parsers", {"a.pdf": P()})
     graph_spy({"qa_answer": ""})
     # App.tsx の handleGlobalChat と同じペイロード
     client.post("/api/agent", json=agent_request("library", selected_text="粘度は？",
@@ -134,8 +136,64 @@ def test_upload_parses_pdf(client, make_pdf, no_vectorstore, tmp_path, monkeypat
     body = resp.json()
     assert body["message"] == "success"
     assert body["references"] == {"[1]": "A. B, Title, 2000."}
+    assert body["pdf_id"] == "paper.pdf"
     assert (tmp_path / "uploads" / "paper.pdf").exists()
     assert client.get("/api/pdf_info").json()["references"] == body["references"]
+
+
+def upload(client, path, filename):
+    with open(path, "rb") as f:
+        return client.post("/api/upload", files={"file": (filename, f, "application/pdf")})
+
+
+def test_multiple_pdfs_are_kept_separately(client, make_pdf, no_vectorstore, graph_spy, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    upload(client, make_pdf([["alpha body [1]"], ["References", "[1] Alpha ref, 2001."]], name="a_src.pdf"), "a.pdf")
+    upload(client, make_pdf([["beta body [1]"], ["References", "[1] Beta ref, 2002."]], name="b_src.pdf"), "b.pdf")
+
+    assert client.get("/api/pdf_info", params={"pdf_id": "a.pdf"}).json()["references"] == {"[1]": "Alpha ref, 2001."}
+    assert client.get("/api/pdf_info", params={"pdf_id": "b.pdf"}).json()["references"] == {"[1]": "Beta ref, 2002."}
+    assert client.get("/api/pdf_info", params={"pdf_id": "missing.pdf"}).status_code == 404
+
+    # pdf_id を指定すると、最後にアップロードした b.pdf ではなく a.pdf の文脈・参考文献を使う
+    seen = graph_spy({"qa_answer": ""})
+    req = agent_request("qa", selected_text="alpha body")
+    req["context"]["pdf_id"] = "a.pdf"
+    client.post("/api/agent", json=req)
+    assert seen["state"]["references_dict"] == {"[1]": "Alpha ref, 2001."}
+    assert "alpha body" in seen["state"]["current_context"]
+
+    # 未指定なら最後にアップロードしたPDF
+    client.post("/api/agent", json=agent_request("qa", selected_text="beta body"))
+    assert seen["state"]["references_dict"] == {"[1]": "Beta ref, 2002."}
+
+
+def test_library_search_spans_all_pdfs(client, make_pdf, graph_spy, tmp_path, monkeypatch):
+    import pdf_parser
+    from langchain_core.embeddings import DeterministicFakeEmbedding
+    monkeypatch.setattr(pdf_parser, "create_embeddings", lambda: DeterministicFakeEmbedding(size=16))
+    monkeypatch.chdir(tmp_path)
+    upload(client, make_pdf([["colloid viscosity"]], name="a_src.pdf"), "a.pdf")
+    upload(client, make_pdf([["quantum spin"]], name="b_src.pdf"), "b.pdf")
+    seen = graph_spy({"qa_answer": ""})
+    client.post("/api/agent", json=agent_request("library", user_intent="colloid viscosity", action_type="library"))
+    ctx = seen["state"]["current_context"]
+    assert "[参照元: a.pdf p.1]" in ctx and "[参照元: b.pdf p.1]" in ctx
+    assert ctx.index("a.pdf") < ctx.index("b.pdf")  # 完全一致する a.pdf が先
+
+
+@pytest.mark.parametrize("filename", ["../evil.pdf", "..\\evil.pdf", "sub/../../evil.pdf"])
+def test_upload_strips_directories_from_filename(client, make_pdf, no_vectorstore, tmp_path, monkeypatch, filename):
+    monkeypatch.chdir(tmp_path)
+    resp = upload(client, make_pdf([["x"]], name="src.pdf"), filename)
+    assert resp.json()["pdf_id"] == "evil.pdf"
+    assert (tmp_path / "uploads" / "evil.pdf").exists()
+    assert not (tmp_path / "evil.pdf").exists()
+
+
+def test_upload_rejects_empty_filename(client, make_pdf, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert upload(client, make_pdf([["x"]], name="src.pdf"), "..").status_code == 400
 
 
 def test_check_oa_delegates(client, monkeypatch):

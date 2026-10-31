@@ -19,8 +19,9 @@ def create_embeddings() -> OpenAIEmbeddings:
     )
 
 class PaperParser:
-    def __init__(self, file_path: str):
+    def __init__(self, file_path: str, doc_id: str = None):
         self.file_path = file_path
+        self.doc_id = doc_id or os.path.basename(file_path)  # ライブラリ内でPDFを識別するID（フロントのファイル名）
         self.doc = fitz.open(file_path)
         
         self.full_text = ""
@@ -179,7 +180,7 @@ class PaperParser:
             # ページごとにDocumentオブジェクトを作成（メタデータにページ番号を保持）
             for page_num, text in self.page_texts.items():
                 if text.strip():
-                    docs.append(Document(page_content=text, metadata={"page": page_num, "source": self.file_path}))
+                    docs.append(Document(page_content=text, metadata={"page": page_num, "source": self.file_path, "doc_id": self.doc_id}))
 
             # テキストを意味の塊（約500文字）ごとに分割
             text_splitter = RecursiveCharacterTextSplitter(
@@ -199,6 +200,22 @@ class PaperParser:
             print(f"⚠️ ベクトルDBの構築に失敗しました: {e}")
             traceback.print_exc()
 
+    def search_with_scores(self, query: str, k: int = 3) -> list:
+        """(Document, 距離) のリストを返す。FAISSの既定はL2距離で、小さいほど関連度が高い"""
+        if not self.vectorstore:
+            return []
+        return self.vectorstore.similarity_search_with_score(query, k=k)
+
+    @staticmethod
+    def format_hits(docs) -> str:
+        """検索結果を、LLMのプロンプトに埋め込みやすい文字列にする"""
+        context_str = ""
+        for res in docs:
+            doc_id = res.metadata.get('doc_id', '?')
+            page = res.metadata.get('page', '?')
+            context_str += f"[参照元: {doc_id} p.{page}]\n{res.page_content}\n\n"
+        return context_str.strip()
+
     def similarity_search(self, query: str, k: int = 3) -> str:
         """
         質問(query)に対して、関連するテキストをベクトルDBから検索し、
@@ -207,12 +224,4 @@ class PaperParser:
         if not self.vectorstore:
             return "ベクトルDBが構築されていないため、検索できません。"
 
-        # 関連度の高いチャンクを上位 k 件取得
-        results = self.vectorstore.similarity_search(query, k=k)
-
-        context_str = ""
-        for i, res in enumerate(results):
-            page = res.metadata.get('page', '?')
-            context_str += f"[参照元: p.{page}]\n{res.page_content}\n\n"
-
-        return context_str.strip()
+        return self.format_hits([doc for doc, _ in self.search_with_scores(query, k=k)])

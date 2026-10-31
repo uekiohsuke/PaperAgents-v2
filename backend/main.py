@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -6,7 +6,6 @@ from typing import Optional, Literal, List
 import uvicorn
 import json
 import asyncio
-from pdf_parser import PaperParser
 from supervisor import app_graph
 from pdf_parser import PaperParser
 from citation_agent import get_oa_status_from_text
@@ -17,7 +16,9 @@ import base64
 import sys
 import tempfile
 
-pdf_parser = None 
+# ライブラリに読み込まれたPDF。キーはフロントと共通のPDFのID（ファイル名）
+pdf_parsers: dict[str, PaperParser] = {}
+last_pdf_id: Optional[str] = None  # pdf_id を送らない古いクライアント向けのフォールバック
 print("✅ サーバーを立ち上げました。PDFのアップロードを待機しています。")
 
 # ==========================================
@@ -27,6 +28,7 @@ class ContextData(BaseModel):
     paper_metadata: Optional[str] = None
     current_context: str
     library_context: Optional[dict] = None
+    pdf_id: Optional[str] = None  # 選択範囲の文脈・参考文献を引くPDF（未指定なら最後にアップロードしたPDF）
 
 class PayloadData(BaseModel):
     selected_text: Optional[str] = None
@@ -63,6 +65,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+def get_parser(pdf_id: Optional[str] = None) -> Optional[PaperParser]:
+    key = pdf_id or last_pdf_id
+    return pdf_parsers.get(key) if key else None
+
+def search_library(query: str, k: int = 3) -> str:
+    """読み込み済みの全PDFを横断してRAG検索し、関連度の高い順に k 件返す"""
+    hits = []
+    for parser in pdf_parsers.values():
+        hits.extend(parser.search_with_scores(query, k=k))
+    hits.sort(key=lambda hit: hit[1])
+    return PaperParser.format_hits([doc for doc, _ in hits[:k]])
+
 # ==========================================
 # エンドポイント
 # ==========================================
@@ -91,26 +105,29 @@ async def summarize_thread(req: ThreadSummaryRequest):
 
 @app.post("/api/upload")
 async def upload_pdf(file: UploadFile = File(...)):
-    global pdf_parser
-    
+    global last_pdf_id
+
+    # ファイル名のディレクトリ部分は捨てる（"../" などで uploads の外に書き込ませない）
+    pdf_id = os.path.basename((file.filename or "").replace("\\", "/"))
+    if pdf_id in ("", ".", ".."):
+        raise HTTPException(status_code=400, detail="ファイル名が不正です。")
+
     # uploadsディレクトリを作って一時保存
     os.makedirs("uploads", exist_ok=True)
-    file_path = f"uploads/{file.filename}"
+    file_path = os.path.join("uploads", pdf_id)
     
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
         
-    print(f"⏳ {file.filename} を解析中...")
-    pdf_parser = PaperParser(file_path) # ここで自作パーサーが走る
+    print(f"⏳ {pdf_id} を解析中...")
+    # 解析とベクトル化は重いので、イベントループを止めないよう別スレッドで実行する
+    parser = await asyncio.to_thread(PaperParser, file_path, pdf_id)
+    pdf_parsers[pdf_id] = parser  # 同名のPDFは置き換える
+    last_pdf_id = pdf_id
     print("✅ 解析完了！")
     
     # 解析結果をフロントにそのまま返す
-    return {
-        "message": "success",
-        "toc": getattr(pdf_parser, "toc", []),
-        "references": getattr(pdf_parser, "references", {}),
-        "citation_pages": getattr(pdf_parser, "citation_pages", {})
-    }
+    return {"message": "success", "pdf_id": pdf_id, **pdf_info_of(parser)}
 
 @app.post("/api/check_oa")
 async def check_oa_status(req: OARequest):
@@ -118,15 +135,22 @@ async def check_oa_status(req: OARequest):
     result = await asyncio.to_thread(get_oa_status_from_text, req.raw_citation)
     return result
 
-@app.get("/api/pdf_info")
-def get_pdf_info():
-    if not pdf_parser:
-        return {"toc": [], "references": {}, "citation_pages": {}}
+def pdf_info_of(parser: PaperParser) -> dict:
     return {
-        "toc": pdf_parser.toc,
-        "references": pdf_parser.references,
-        "citation_pages": getattr(pdf_parser, "citation_pages", {}) 
+        "toc": parser.toc,
+        "references": parser.references,
+        "citation_pages": getattr(parser, "citation_pages", {})
     }
+
+@app.get("/api/pdf_info")
+def get_pdf_info(pdf_id: Optional[str] = None):
+    parser = get_parser(pdf_id)
+    if parser is None:
+        if pdf_id:
+            # サーバー再起動などで消えている。フロントは再アップロードする
+            raise HTTPException(status_code=404, detail=f"{pdf_id} は読み込まれていません。")
+        return {"toc": [], "references": {}, "citation_pages": {}}
+    return pdf_info_of(parser)
 
 @app.post("/api/agent")
 async def run_agent(request: AgentRequest):
@@ -135,6 +159,7 @@ async def run_agent(request: AgentRequest):
     async def agent_events():
         current_context = request.context.current_context
         target_reference = request.payload.target_reference_text
+        pdf_parser = get_parser(request.context.pdf_id)
 
         # 🌟 修正1: pdf_parser が None じゃない時だけ get_context_around を実行する
         if request.task_type in ["qa", "math", "chart"] and (request.payload.selected_text or request.payload.selected_image):
@@ -148,9 +173,9 @@ async def run_agent(request: AgentRequest):
         elif request.task_type == "library":
             # action_type はフロントが固定値 "library" を送るため検索語に使わない
             search_query = request.payload.user_intent or request.payload.selected_text or ""
-            if pdf_parser is not None and getattr(pdf_parser, "vectorstore", None) is not None:
-                print(f"🔍 RAG検索を実行中: {search_query}")
-                search_result = pdf_parser.similarity_search(search_query)
+            if any(getattr(p, "vectorstore", None) is not None for p in pdf_parsers.values()):
+                print(f"🔍 RAG検索を実行中（{len(pdf_parsers)}本のPDF）: {search_query}")
+                search_result = await asyncio.to_thread(search_library, search_query)
                 current_context = f"【RAG検索結果】\n{search_result}"
                 print("✅ RAG検索完了")
             else:
