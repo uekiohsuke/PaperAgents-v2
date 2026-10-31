@@ -106,8 +106,6 @@ def _check_paper_availability_cached(query_title: str, query_authors: str = ""):
 check_paper_availability_keyless.cache_clear = _check_paper_availability_cached.cache_clear
 
 # ==========================================
-# ネットワークグラフ用 APIツール (Semantic Scholar)
-# ==========================================
 def fetch_citation_network(query_title: str, max_nodes: int = 15):
     """
     指定された論文を中心に、引用（References）と被引用（Citations）の
@@ -403,15 +401,3 @@ if __name__ == "__main__":
     
     # print("\n■ 【ユーザー表示用】関連性の解説")
     # print(result_web['relevance_explanation'])
-
-    # print("\n\n=== 🧪 テストC: 引用ネットワークの構築テスト ===")
-    # # アインシュタインの相対性理論の論文タイトルでネットワークテスト
-    # network_data = fetch_citation_network("Zur Elektrodynamik bewegter Körper")
-    
-    # print(f"\n■ 【システム用】生成されたD3.js用グラフデータ (Nodes: {len(network_data['nodes'])})")
-    # for node in network_data['nodes'][:5]: # 長いので5件だけ表示
-    #     print(f"  - [{node['group']}] {node['title'][:50]}...")
-        
-    # print(f"\n■ 【システム用】生成されたエッジ/リンク (Links: {len(network_data['links'])})")
-    # for link in network_data['links'][:5]:
-    #     print(f"  - {link['source'][:8]}... -> {link['target'][:8]}...")

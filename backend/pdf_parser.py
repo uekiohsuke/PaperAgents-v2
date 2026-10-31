@@ -206,19 +206,3 @@ class PaperParser:
             context_str += f"[参照元: p.{page}]\n{res.page_content}\n\n"
 
         return context_str.strip()
-
-if __name__ == "__main__":
-    test_pdf_path = "sample.pdf" 
-    
-    try:
-        parser = PaperParser(test_pdf_path)
-        
-        print("\n🔍 RAG ベクトル検索テスト:")
-        query = "コロイドの粘度"
-        print(f"質問: {query}")
-        print("-" * 30)
-        print(parser.similarity_search(query, k=2))
-        print("-" * 30)
-        
-    except Exception as e:
-        print(f"エラーが発生しました: {e}")
