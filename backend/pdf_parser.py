@@ -1,12 +1,22 @@
 import fitz  # PyMuPDF
 import re
+import os
 import traceback
 
 # 🌟 追加: RAG用のライブラリ
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_ollama import OllamaEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
+
+def create_embeddings() -> OpenAIEmbeddings:
+    return OpenAIEmbeddings(
+        base_url=os.environ.get("LOCAL_OPENAI_BASE_URL", "http://127.0.0.1:1234/v1"),
+        api_key=os.environ.get("LOCAL_OPENAI_API_KEY") or "dummy",  # 空文字は新しい openai が拒否する
+        model=os.environ.get("LOCAL_OPENAI_EMBEDDING_MODEL_NAME", "mxbai-embed-large"),
+        # OpenAI以外のサーバーはトークンID列の入力を受け付けないため、文字列のまま送る
+        check_embedding_ctx_length=False,
+    )
 
 class PaperParser:
     def __init__(self, file_path: str):
@@ -179,8 +189,8 @@ class PaperParser:
             )
             split_docs = text_splitter.split_documents(docs)
 
-            # OllamaのEmbeddingモデルを使用してベクトル化
-            embeddings = OllamaEmbeddings(model="mxbai-embed-large")
+            # LLMと同じOpenAI互換APIのEmbeddingモデルでベクトル化
+            embeddings = create_embeddings()
 
             # FAISSデータベースの作成
             self.vectorstore = FAISS.from_documents(split_docs, embeddings)

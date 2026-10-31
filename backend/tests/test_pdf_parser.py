@@ -85,3 +85,23 @@ def test_citation_ranges_are_expanded(make_pdf, no_vectorstore):
     assert p.citation_pages["[2]"] == [1, 2, 3]
     assert p.citation_pages["[4]"] == [2, 3]
     assert p.citation_pages["[5]"] == [1, 3]
+
+
+def test_embeddings_use_openai_compatible_settings(monkeypatch):
+    import pdf_parser
+    monkeypatch.setenv("LOCAL_OPENAI_BASE_URL", "http://embed.local/v1")
+    monkeypatch.setenv("LOCAL_OPENAI_API_KEY", "")
+    monkeypatch.setenv("LOCAL_OPENAI_EMBEDDING_MODEL_NAME", "my-embed")
+    emb = pdf_parser.create_embeddings()
+    assert (emb.openai_api_base, emb.model) == ("http://embed.local/v1", "my-embed")
+    assert emb.openai_api_key.get_secret_value() == "dummy"
+    assert emb.check_embedding_ctx_length is False
+
+
+def test_vectorstore_search_returns_page(make_pdf, monkeypatch):
+    import pdf_parser
+    from langchain_core.embeddings import DeterministicFakeEmbedding
+    monkeypatch.setattr(pdf_parser, "create_embeddings", lambda: DeterministicFakeEmbedding(size=16))
+    p = PaperParser(make_pdf([["colloid viscosity"], ["quantum spin"]]))
+    assert p.vectorstore is not None
+    assert "[参照元: p." in p.similarity_search("colloid viscosity", k=1)

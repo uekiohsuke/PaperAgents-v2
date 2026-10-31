@@ -70,6 +70,6 @@ def make_pdf(tmp_path):
 
 @pytest.fixture
 def no_vectorstore(monkeypatch):
-    """Ollama Embeddingに依存しないよう、ベクトルDB構築を無効化する"""
+    """Embedding APIに依存しないよう、ベクトルDB構築を無効化する"""
     import pdf_parser
     monkeypatch.setattr(pdf_parser.PaperParser, "_build_vectorstore", lambda self: None)
