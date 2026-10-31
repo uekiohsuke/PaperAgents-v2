@@ -9,6 +9,7 @@ import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import remarkBreaks from 'remark-breaks';
 import ForceGraph2D from 'react-force-graph-2d';
+import { ModelSettingsButton } from './ModelSettings';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.mjs',
@@ -1538,6 +1539,9 @@ const askLibraryAgent = async (text: string) => {
         </div>
 
         <div data-tauri-drag-region style={{ flex: 1, height: "100%" }} /> {/* スペーサー */}
+
+        {/* モデル設定 */}
+        <ModelSettingsButton />
 
         {/* ダークモード切り替え */}
         <button
