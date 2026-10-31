@@ -10,6 +10,7 @@ import 'katex/dist/katex.min.css';
 import remarkBreaks from 'remark-breaks';
 import ForceGraph2D from 'react-force-graph-2d';
 import { ModelSettingsButton } from './ModelSettings';
+import { readSseEvents } from './sse';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.mjs',
@@ -48,24 +49,6 @@ type TranslationVocab = {
   translated: string;
   page: number;
   terms: { term: string; description: string }[];
-};
-
-type GraphNode = {
-  id: string;
-  title: string;
-  type: "loaded" | "unloaded"; // 読み込み済みか、参考文献リストに載っているだけか
-  isPinned?: boolean; // 🌟 追加
-  group?: string;
-  val: number; // ノードの大きさ（被引用数など）
-  fileName?: string;
-  localCitationCount?: number;
-  oaStatus?: "unchecked" | "checking" | "open" | "closed";
-  docType?: "pdf" | "web" | "unknown";
-};
-
-type GraphLink = {
-  source: string;
-  target: string;
 };
 
 type ViewMode = "reader" | "network";
@@ -112,7 +95,6 @@ function App() {
   const [inputText, setInputText] = useState("");
   
   // 処理state
-  const [currentTask, setCurrentTask] = useState<string>("");
   const [isLoading, setIsLoading] = useState<boolean>(false);
 
   // 矩形選択用state
@@ -1225,41 +1207,25 @@ const askLibraryAgent = async (text: string) => {
       });
 
       if (!response.body) throw new Error("ストリーム非対応");
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder("utf-8");
       
       let accumulatedResponse = "";
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const chunkStr = decoder.decode(value, { stream: true });
-        const lines = chunkStr.split('\n');
+      for await (const data of readSseEvents(response.body)) {
+        if (data.status === "error") throw agentError(data.message);
         
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const dataStr = line.slice(6);
-            if (!dataStr.trim()) continue;
-
-            const data = JSON.parse(dataStr);
-            if (data.status === "error") throw agentError(data.message);
-            
-            if (data.chunk) {
-              accumulatedResponse += data.chunk;
-              
-              // 🌟 魔法のロジック: ストリーム中に [node:xxx] が出たらハイライトをオンにする
-              const nodeMatches = [...accumulatedResponse.matchAll(/\[node:(.*?)\]/g)];
-              if (nodeMatches.length > 0) {
-                const ids = nodeMatches.map(m => m[1]);
-                setHighlightedNodes(prev => [...new Set([...prev, ...ids])]); // 重複排除してセット
-              }
-
-              setGlobalMessages(prev => prev.map(msg => 
-                msg.id === aiMsgId ? { ...msg, content: accumulatedResponse } : msg
-              ));
-            }
+        if (data.chunk) {
+          accumulatedResponse += data.chunk;
+          
+          // 🌟 魔法のロジック: ストリーム中に [node:xxx] が出たらハイライトをオンにする
+          const nodeMatches = [...accumulatedResponse.matchAll(/\[node:(.*?)\]/g)];
+          if (nodeMatches.length > 0) {
+            const ids = nodeMatches.map(m => m[1]);
+            setHighlightedNodes(prev => [...new Set([...prev, ...ids])]); // 重複排除してセット
           }
+
+          setGlobalMessages(prev => prev.map(msg => 
+            msg.id === aiMsgId ? { ...msg, content: accumulatedResponse } : msg
+          ));
         }
       }
     } catch (error: any) {
@@ -1277,7 +1243,6 @@ const askLibraryAgent = async (text: string) => {
     // 選択テキスト、画像、自由入力のいずれかが無いと発火しない
     if (!selectedText && !croppedImage && !customText) return; 
     setIsLoading(true);
-    setCurrentTask(taskType);
     abortControllerRef.current = new AbortController();
 
     // ユーザーのメッセージを配列に追加
@@ -1344,113 +1309,96 @@ const askLibraryAgent = async (text: string) => {
       if (!response.ok) throw new Error("APIエラー");
       if (!response.body) throw new Error("ストリームがサポートされていません");
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder("utf-8");
+      for await (const data of readSseEvents(response.body)) {
+        if (data.done) {
+          if (data.done && payload.action_type === "translate") {
+            // 🌟 修正ポイント：setThreads の中で、最新の全スレッド状態（prevThreads）を受け取る
+            setThreads(prevThreads => {
+              
+              // 1. 全スレッドの中から、今操作しているスレッド（targetThreadId）を探し出す！
+              const currentThread = prevThreads.find(t => t.id === targetThreadId);
+              
+              // 2. 探し出したスレッド（currentThread）の中から、AIの最新メッセージを探す！
+              const latestAiMsg = currentThread?.messages.find(m => m.id === aiMsgId);
+              
+              if (latestAiMsg) {
+                let suggestions: any = { terms: [] };
+                try {
+                  suggestions = JSON.parse(data.dict_suggestions || "{\"terms\":[]}");
+                } catch (error) {
+                  // 辞書が壊れていても翻訳結果は単語帳に残す
+                  console.error("辞書データの解析エラー:", error);
+                }
+                
+                const newEntry: TranslationVocab = {
+                  id: Date.now().toString(),
+                  original: selectedText,
+                  translated: latestAiMsg.content,
+                  page: pageNumber,
+                  terms: suggestions.terms || []
+                };
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const chunkStr = decoder.decode(value, { stream: true });
-        const lines = chunkStr.split('\n');
-        
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const dataStr = line.slice(6);
-            if (!dataStr.trim()) continue;
-
-            const data = JSON.parse(dataStr);
-            if (data.done) {
-              if (data.done && payload.action_type === "translate") {
-                // 🌟 修正ポイント：setThreads の中で、最新の全スレッド状態（prevThreads）を受け取る
-                setThreads(prevThreads => {
-                  
-                  // 1. 全スレッドの中から、今操作しているスレッド（targetThreadId）を探し出す！
-                  const currentThread = prevThreads.find(t => t.id === targetThreadId);
-                  
-                  // 2. 探し出したスレッド（currentThread）の中から、AIの最新メッセージを探す！
-                  const latestAiMsg = currentThread?.messages.find(m => m.id === aiMsgId);
-                  
-                  if (latestAiMsg) {
-                    let suggestions: any = { terms: [] };
-                    try {
-                      suggestions = JSON.parse(data.dict_suggestions || "{\"terms\":[]}");
-                    } catch (error) {
-                      // 辞書が壊れていても翻訳結果は単語帳に残す
-                      console.error("辞書データの解析エラー:", error);
-                    }
-                    
-                    const newEntry: TranslationVocab = {
-                      id: Date.now().toString(),
-                      original: selectedText,
-                      translated: latestAiMsg.content,
-                      page: pageNumber,
-                      terms: suggestions.terms || []
-                    };
-
-                    setVocabList(prev => [newEntry, ...prev]);
-                    if (pos) {
-                      setTranslationPopup({ 
-                        text: latestAiMsg.content, 
-                        pos: { x: pos.x, y: Math.max(10, pos.y - 120) } 
-                      });
-                    }
-                  }
-                  
-                  // 既存のthreads状態はそのまま返す
-                  return prevThreads;
-                });
+                setVocabList(prev => [newEntry, ...prev]);
+                if (pos) {
+                  setTranslationPopup({ 
+                    text: latestAiMsg.content, 
+                    pos: { x: pos.x, y: Math.max(10, pos.y - 120) } 
+                  });
+                }
               }
-              else if (taskType === "code") {
-                setThreads(prevThreads => {
-                  const currentThread = prevThreads.find(t => t.id === targetThreadId);
-                  const latestAiMsg = currentThread?.messages.find(m => m.id === aiMsgId);
-                  
-                  if (latestAiMsg) {
-                    // マークダウンのコードブロックから中身だけを抽出する正規表現
-                    const codeMatch = latestAiMsg.content.match(/```[a-zA-Z]*\s*\n([\s\S]*?)```/);
-                    if (codeMatch && codeMatch[1]) {
-                      setCodePopup({ 
-                        text: "シミュレーションコードが生成されました", 
-                        code: codeMatch[1].trim(),
-                        threadId: targetThreadId
-                      });
-                    }
-                  }
-                  return prevThreads;
-                });
-              }
-              break; 
-            }
-            if (data.status === "info") continue;
-            if (data.status === "error") throw agentError(data.message);
-
-            if (data.paper_info) {
-              setThreads(prevThreads => prevThreads.map(thread => 
-                thread.id === targetThreadId
-                  ? {
-                      ...thread,
-                      messages: thread.messages.map(msg => 
-                        msg.id === aiMsgId ? { ...msg, paperInfo: data.paper_info } : msg
-                      )
-                    }
-                  : thread
-              ));
-            }
-
-            if (data.chunk) {
-              setThreads(prevThreads => prevThreads.map(thread => 
-                thread.id === targetThreadId
-                  ? {
-                      ...thread,
-                      messages: thread.messages.map(msg => 
-                        msg.id === aiMsgId ? { ...msg, content: msg.content + data.chunk } : msg
-                      )
-                    }
-                  : thread
-              ));
-            }
+              
+              // 既存のthreads状態はそのまま返す
+              return prevThreads;
+            });
           }
+          else if (taskType === "code") {
+            setThreads(prevThreads => {
+              const currentThread = prevThreads.find(t => t.id === targetThreadId);
+              const latestAiMsg = currentThread?.messages.find(m => m.id === aiMsgId);
+              
+              if (latestAiMsg) {
+                // マークダウンのコードブロックから中身だけを抽出する正規表現
+                const codeMatch = latestAiMsg.content.match(/```[a-zA-Z]*\s*\n([\s\S]*?)```/);
+                if (codeMatch && codeMatch[1]) {
+                  setCodePopup({ 
+                    text: "シミュレーションコードが生成されました", 
+                    code: codeMatch[1].trim(),
+                    threadId: targetThreadId
+                  });
+                }
+              }
+              return prevThreads;
+            });
+          }
+          break; 
+        }
+        if (data.status === "info") continue;
+        if (data.status === "error") throw agentError(data.message);
+
+        if (data.paper_info) {
+          setThreads(prevThreads => prevThreads.map(thread => 
+            thread.id === targetThreadId
+              ? {
+                  ...thread,
+                  messages: thread.messages.map(msg => 
+                    msg.id === aiMsgId ? { ...msg, paperInfo: data.paper_info } : msg
+                  )
+                }
+              : thread
+          ));
+        }
+
+        if (data.chunk) {
+          setThreads(prevThreads => prevThreads.map(thread => 
+            thread.id === targetThreadId
+              ? {
+                  ...thread,
+                  messages: thread.messages.map(msg => 
+                    msg.id === aiMsgId ? { ...msg, content: msg.content + data.chunk } : msg
+                  )
+                }
+              : thread
+          ));
         }
       }
     } catch (error: any) {
@@ -1650,15 +1598,12 @@ const askLibraryAgent = async (text: string) => {
 
                             // UI表示用の状態変換
                             let statusBg = "var(--bg-hover)"; let statusText = "var(--text-muted)";
-                            let displayStatusText = "";
                             
                             if (currentOaStatus === "open") {
-                              if (currentDocType === "pdf") { statusBg = "#DCFCE7"; statusText = "#166534"; displayStatusText = "✅ PDF"; }
-                              else { statusBg = "#DBEAFE"; statusText = "#1E40AF"; displayStatusText = "🌐 Web"; }
+                              if (currentDocType === "pdf") { statusBg = "#DCFCE7"; statusText = "#166534"; }
+                              else { statusBg = "#DBEAFE"; statusText = "#1E40AF"; }
                             } else if (currentOaStatus === "checked") {
-                              statusBg = "#F3F4F6"; statusText = "#6B7280"; displayStatusText = "❌ 不可";
-                            } else if (currentOaStatus === "checking") {
-                              displayStatusText = "⏳ 確認中...";
+                              statusBg = "#F3F4F6"; statusText = "#6B7280";
                             }
 
                             // ※ oaStatuses (辞書State) は、一時的なURL情報などを保持するためだけに残す
