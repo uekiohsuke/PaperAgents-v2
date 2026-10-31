@@ -1,13 +1,14 @@
 import os
 import json
-from typing import TypedDict, Optional, Any
+from typing import TypedDict, Optional, Any, List, Dict
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, START, END
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from langchain_core.output_parsers import JsonOutputParser
 from dotenv import load_dotenv
+from qa_agent import format_history_to_messages
 
 load_dotenv()
 
@@ -24,8 +25,11 @@ class MathState(TypedDict):
     raw_image: Optional[str]
     raw_text: Optional[str]
     extracted_text: Optional[str]
+    selected_tex: Optional[str]
     action_type: str
+    user_intent: str  # 自由入力の質問（定型ボタンの場合は action_type と同じ値）
     current_context: str
+    chat_history: List[Dict[str, str]]
     math_result: str
 
 # ==========================================
@@ -67,6 +71,7 @@ prompt_explain = ChatPromptTemplate.from_messages([
 ---
 上記に従い、以下の数式の意味を直感的に解説してください。
 """),
+    MessagesPlaceholder(variable_name="chat_history"),
     ("human", "【対象の数式】\n$$ {clean_tex} $$\n\n【数式に含まれる変数の情報】\n{variables_info}\n\n【周辺の文脈】\n{current_context}\n\nこの数式が何を言いたいのか、意味を解説してください。")
 ])
 
@@ -113,14 +118,39 @@ $$ x e^x - e^x $$
 ---
 上記に従い、以下の数式・変形の詳細な操作解説を出力してください。
 """),
+    MessagesPlaceholder(variable_name="chat_history"),
     ("human", "【対象の数式】\n$$ {clean_tex} $$\n\n【数式に含まれる変数の情報】\n{variables_info}\n\n【周辺の文脈】\n{current_context}\n\n上記の数式の導出過程（式変形）を詳細に教えてください。")
 ])
+
+# ==========================================
+# パターンC：自由入力の質問への回答
+# ==========================================
+prompt_question = ChatPromptTemplate.from_messages([
+    ("system", r"""あなたは物理学と数学の専門エージェントです。
+ユーザーは、提示された数式について具体的な質問をしています。提供された【周辺の文脈】と会話の流れを踏まえ、質問に的確に答えてください。
+
+【重要なフォーマット指示】
+1. 質問に直接答えることを最優先し、質問されていない一般的な解説で水増ししないでください。
+2. 必要に応じて式変形や具体例を用いて構いません。
+3. 数式は必ずブロック形式のTeX（$$数式$$）またはインライン形式のTeX（$数式$）を使用してください。
+4. 数式の前後には必ず「空行（改行2回）」を入れて、見やすく出力してください。
+"""),
+    MessagesPlaceholder(variable_name="chat_history"),
+    ("human", "【対象の数式】\n$$ {clean_tex} $$\n\n【数式に含まれる変数の情報】\n{variables_info}\n\n【周辺の文脈】\n{current_context}\n\n【ユーザーの質問】\n{question}")
+])
+
+# 定型ボタンから送られる action_type。これ以外は自由入力の質問として扱う
+PRESET_ACTIONS = {"explain", "explain_step", "derivation"}
 
 # ==========================================
 # エージェントのノード処理
 # ==========================================
 def math_agent_node(state: MathState):
-    action_type = state.get("action_type", "explain_step")
+    action_type = state.get("action_type") or "explain_step"
+    # フロントは自由入力の質問を user_intent と action_type の両方に入れて送る
+    question = state.get("user_intent") or action_type
+    if action_type not in PRESET_ACTIONS:
+        action_type = "question"
     
     # OCRエージェントからの抽出結果（なければ生テキスト）を優先して取得
     clean_tex = state.get("extracted_text") or state.get("raw_text") or state.get("selected_tex") or ""
@@ -149,13 +179,20 @@ def math_agent_node(state: MathState):
 
     print("  => Step 2: 導出・解説の生成を開始...")
     
-    target_prompt = prompt_derivation if action_type == "derivation" else prompt_explain
+    if action_type == "question":
+        target_prompt = prompt_question
+    elif action_type == "derivation":
+        target_prompt = prompt_derivation
+    else:
+        target_prompt = prompt_explain
     chain_step2 = target_prompt | llm
     
     response_step2 = chain_step2.invoke({
         "clean_tex": clean_tex,
         "variables_info": variables_info,
-        "current_context": state.get("current_context", "特に文脈情報なし")
+        "current_context": state.get("current_context", "特に文脈情報なし"),
+        "question": question,
+        "chat_history": format_history_to_messages(state.get("chat_history", []))
     })
 
     print("Math Agent 作業終了")

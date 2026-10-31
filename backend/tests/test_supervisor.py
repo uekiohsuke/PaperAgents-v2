@@ -61,7 +61,6 @@ def test_graph_ocr_empty_result(fake_llm):
     supervisor.app_graph.invoke(base_state(intent="qa", raw_image="xx"))
 
 
-@pytest.mark.xfail(reason="CodeState に chat_history が無いため、修正依頼時に前回のコードがLLMに渡らない", strict=True)
 def test_code_fix_request_sees_previous_code(fake_llm):
     llm = fake_llm(code_agent, "```python\nprint(2)\n```")
     history = [{"role": "ai", "content": "```python\nprint('PREVIOUS_CODE')\n```"}]
@@ -69,9 +68,35 @@ def test_code_fix_request_sees_previous_code(fake_llm):
     assert "PREVIOUS_CODE" in llm.all_text()
 
 
-@pytest.mark.xfail(reason="MathState に user_intent が無いため、Mathボタンの自由入力の質問がLLMに渡らない", strict=True)
 def test_math_free_question_reaches_llm(fake_llm):
     llm = fake_llm(math_agent, '{"extracted_content": "", "variables": []}', "回答")
     supervisor.app_graph.invoke(base_state(intent="math", raw_text="E=mc^2",
                                            user_intent="なぜcの2乗なのか", action_type="なぜcの2乗なのか"))
     assert "なぜcの2乗なのか" in llm.all_text(-1)
+
+
+def test_math_preset_button_uses_preset_prompt(fake_llm):
+    llm = fake_llm(math_agent, '{"extracted_content": "", "variables": []}', "回答")
+    supervisor.app_graph.invoke(base_state(intent="math", raw_text="E=mc^2",
+                                           user_intent="derivation", action_type="derivation"))
+    assert "導出過程" in llm.all_text(-1) and "【ユーザーの質問】" not in llm.all_text(-1)
+
+
+def test_math_selected_tex_and_history_reach_llm(fake_llm):
+    llm = fake_llm(math_agent, '{"extracted_content": "", "variables": []}', "回答")
+    history = [{"role": "user", "content": "PREVIOUS_QUESTION"}]
+    supervisor.app_graph.invoke(base_state(intent="math", selected_tex="a^2+b^2=c^2",
+                                           user_intent="explain", action_type="explain", chat_history=history))
+    assert "a^2+b^2=c^2" in llm.all_text(-1) and "PREVIOUS_QUESTION" in llm.all_text(-1)
+
+
+@pytest.mark.parametrize("node", [
+    code_agent.code_agent_node, math_agent.math_agent_node, qa_agent.qa_agent_node,
+    supervisor.chart_agent_node, supervisor.citation_agent_node,
+])
+def test_node_state_declares_every_key_it_reads(node):
+    """LangGraphはノードの型注釈に宣言されたキーしか渡さないため、読むキーは全て宣言が必要"""
+    import inspect, re, typing
+    state_type = typing.get_type_hints(node)["state"]
+    read_keys = set(re.findall(r'state(?:\.get\(|\[)"(\w+)"', inspect.getsource(node)))
+    assert read_keys - set(state_type.__annotations__) == set()

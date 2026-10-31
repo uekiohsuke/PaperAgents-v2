@@ -1,11 +1,12 @@
 # code_agent.py
 import os
-from typing import TypedDict, Optional
+from typing import TypedDict, Optional, List, Dict
 from langgraph.graph import StateGraph, START, END
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
+from qa_agent import format_history_to_messages
 
 load_dotenv()
 
@@ -23,6 +24,7 @@ class CodeState(TypedDict):
     selected_text: Optional[str]
     user_intent: str
     current_context: str
+    chat_history: List[Dict[str, str]]  # 修正依頼時に前回のコードをLLMへ渡すため
     code_result: str
 
 # ==========================================
@@ -38,7 +40,9 @@ prompt_code = ChatPromptTemplate.from_messages([
 3. グラフ化: 軸ラベル、タイトル、凡例を必ず含めること。
 4. 出力形式: 最初に簡単な解説（力学的な構造のメタファーを含む）を述べた後、必ず ```python と ``` で囲んだコードブロックを出力すること。
 5. コードはコピペしてすぐに実行できる完全なスクリプトにすること。
+6. 会話履歴に以前生成したコードがあり、ユーザーが修正を求めている場合は、そのコードを土台に修正した完全なスクリプトを出力すること。
 """),
+    MessagesPlaceholder(variable_name="chat_history"),
     ("human", "【対象の数式・テキスト】\n{clean_text}\n\n【周辺の文脈】\n{current_context}\n\n【ユーザーの意図】\n{user_intent}\n\n上記の物理現象や数式をシミュレーション・可視化するPythonコードを生成してください。")
 ])
 
@@ -59,7 +63,8 @@ def code_agent_node(state: CodeState):
     response = chain.invoke({
         "clean_text": clean_text,
         "current_context": current_context,
-        "user_intent": user_intent
+        "user_intent": user_intent,
+        "chat_history": format_history_to_messages(state.get("chat_history", []))
     })
 
     print("💻 Code Agent 作業終了")
