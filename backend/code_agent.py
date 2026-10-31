@@ -3,7 +3,7 @@ from typing import TypedDict, Optional, List, Dict
 from langgraph.graph import StateGraph, START, END
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import SystemMessage, HumanMessage
-from llm_settings import make_llm
+from llm_settings import make_llm, truncation_notice
 from dotenv import load_dotenv
 from qa_agent import format_history_to_messages
 
@@ -63,7 +63,7 @@ def code_agent_node(state: CodeState):
 
     print("💻 Code Agent 作業終了")
 
-    return {"code_result": response.content}
+    return {"code_result": response.content + truncation_notice(response)}
 
 # グラフ構築（単体テスト用）
 graph_builder = StateGraph(CodeState)

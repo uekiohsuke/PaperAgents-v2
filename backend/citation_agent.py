@@ -7,7 +7,7 @@ from langgraph.graph import StateGraph, START, END
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 from langchain_core.output_parsers import JsonOutputParser
-from llm_settings import make_llm
+from llm_settings import make_llm, truncation_notice
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -259,7 +259,7 @@ def citation_agent_node(state: CitationState):
     
     return {
         "paper_info": paper_info,
-        "relevance_explanation": response.content.strip()
+        "relevance_explanation": response.content.strip() + truncation_notice(response)
     }
 
 # グラフ構築

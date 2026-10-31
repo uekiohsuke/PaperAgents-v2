@@ -1,3 +1,4 @@
+import pytest
 import qa_agent
 import math_agent
 import chart_agent
@@ -61,10 +62,10 @@ def test_qa_thread_summary_mode(fake_llm):
 
 
 def test_qa_extra_dict_marker_breaks_split(fake_llm):
-    # "[辞書データ]" が2回出ると split が3要素になり ValueError → 全文が回答扱いになる
+    # "[辞書データ]" が2回出ると split が3要素になり ValueError → 見出しを除いた全文が回答扱いになる
     raw = "[回答]\n[辞書データ]という語\n[辞書データ]\n{}"
     fake_llm(qa_agent, raw)
-    assert qa_agent.qa_agent_node({"user_intent": "explain", "raw_text": "s"})["qa_answer"] == raw
+    assert qa_agent.qa_agent_node({"user_intent": "explain", "raw_text": "s"})["qa_answer"] == raw.replace("[回答]\n", "")
 
 
 # ==========================================
@@ -123,3 +124,39 @@ def test_library_formats_network_info(fake_llm):
     text = llm.all_text()
     assert "粘度について" in text and "sample.pdf" in text and "Colloids" in text
 
+
+
+# ==========================================
+# 出力上限による打ち切りの注意書き
+# ==========================================
+NOTICE = "最大出力トークン数"
+
+
+def test_qa_truncated_answer_gets_notice(fake_llm):
+    fake_llm(qa_agent, "[回答]\n途中まで", finish_reason="length")
+    out = qa_agent.qa_agent_node({"user_intent": "explain", "raw_text": "s"})
+    assert out["qa_answer"].startswith("途中まで") and NOTICE in out["qa_answer"]
+
+
+def test_qa_truncated_in_dict_section_keeps_answer_clean(fake_llm):
+    # 回答本文は完結しているので注意書きは付けない
+    fake_llm(qa_agent, '[回答]\n完結した回答\n[辞書データ]\n{"terms": [', finish_reason="length")
+    assert qa_agent.qa_agent_node({"user_intent": "explain", "raw_text": "s"})["qa_answer"] == "完結した回答"
+
+
+def test_complete_answer_has_no_notice(fake_llm):
+    fake_llm(qa_agent, "[回答]\n短い", finish_reason="stop")
+    assert NOTICE not in qa_agent.qa_agent_node({"user_intent": "explain", "raw_text": "s"})["qa_answer"]
+
+
+@pytest.mark.parametrize("module,node,state,key", [
+    ("math_agent", "math_agent_node", {"raw_text": "E=mc^2", "action_type": "explain"}, "math_result"),
+    ("chart_agent", "chart_agent_node", {"action_type": "explain"}, "qa_answer"),
+    ("code_agent", "code_agent_node", {"raw_text": "x"}, "code_result"),
+    ("library_agent", "library_agent_node", {"raw_text": "q"}, "qa_answer"),
+])
+def test_truncated_answers_get_notice(fake_llm, module, node, state, key):
+    import importlib
+    mod = importlib.import_module(module)
+    fake_llm(mod, "途中まで", finish_reason="length")
+    assert NOTICE in getattr(mod, node)(state)[key]

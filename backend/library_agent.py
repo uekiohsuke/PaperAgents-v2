@@ -1,7 +1,6 @@
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
 from dotenv import load_dotenv
-from llm_settings import make_llm
+from llm_settings import make_llm, truncation_notice
 
 load_dotenv()
 
@@ -52,13 +51,13 @@ def library_agent_node(state: dict) -> dict:
         ("human", "{user_prompt}")
     ])
 
-    chain = prompt | llm | StrOutputParser()
+    chain = prompt | llm
     
     # ストリーミング対応のために yield できるように直接返すのではなく、
     # 実際は main.py のストリーミング機構が文字単位で拾うため、ここで一括生成して dict に詰めます。
     # （LangGraphの非同期ストリーミングの作りに合わせて出力します）
     
     # ※本番環境では astream 等を使いますが、現状のコードベースに合わせて invoke します
-    result = chain.invoke({"user_prompt": user_prompt})
+    response = chain.invoke({"user_prompt": user_prompt})
     
-    return {"qa_answer": result}
+    return {"qa_answer": response.content + truncation_notice(response)}

@@ -1,7 +1,7 @@
 from typing import TypedDict, Optional
 from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import SystemMessage, HumanMessage
-from llm_settings import make_llm
+from llm_settings import make_llm, truncation_notice
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -56,7 +56,7 @@ def chart_agent_node(state: ChartState):
 
     try:
         response = llm.invoke(messages)
-        result_text = response.content
+        result_text = response.content + truncation_notice(response)
         print("  ✨ 解析成功")
     except Exception as e:
         print(f"  ⚠️ Chart Agent エラー: {e}")

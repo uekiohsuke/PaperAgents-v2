@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, START, END
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import SystemMessage, HumanMessage
-from llm_settings import make_llm
+from llm_settings import make_llm, truncation_notice
 from langchain_core.output_parsers import JsonOutputParser
 from dotenv import load_dotenv
 from qa_agent import format_history_to_messages
@@ -190,7 +190,7 @@ def math_agent_node(state: MathState):
 
     print("Math Agent 作業終了")
 
-    return {"math_result": response_step2.content}
+    return {"math_result": response_step2.content + truncation_notice(response_step2)}
 
 # グラフ構築
 graph_builder = StateGraph(MathState)

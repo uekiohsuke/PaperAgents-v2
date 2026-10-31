@@ -104,3 +104,11 @@ def list_models() -> list:
     """接続先のOpenAI互換APIが提供するモデルIDの一覧"""
     client = OpenAI(**_connection(), timeout=5)
     return sorted(model.id for model in client.models.list())
+
+
+def truncation_notice(response) -> str:
+    """出力上限で打ち切られた応答なら、回答の末尾に付ける注意書きを返す（打ち切られていなければ空文字）"""
+    if response.response_metadata.get("finish_reason") != "length":
+        return ""
+    return (f"\n\n> ⚠️ 最大出力トークン数（{_settings['max_tokens']}）に達したため、回答が途中で切れています。"
+            "ヘッダーの ⚙️ モデル設定で上限を増やせます。")

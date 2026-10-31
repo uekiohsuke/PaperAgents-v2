@@ -4,7 +4,7 @@ from langgraph.graph import StateGraph, START, END
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
-from llm_settings import make_llm
+from llm_settings import make_llm, truncation_notice
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -97,7 +97,8 @@ def qa_agent_node(state: QAState):
             answer_text = answer_part.replace("[回答]", "").strip()
             dict_json_str = dict_part.strip()
         except ValueError:
-            answer_text = raw_output
+            # [辞書データ] まで届かなかった（上限で翻訳の途中で切れた場合を含む）
+            answer_text = raw_output.replace("[回答]", "").strip() + truncation_notice(response)
             dict_json_str = "[]"
             
         print("QA Agent 作業終了 (翻訳モード)")
@@ -124,7 +125,7 @@ def qa_agent_node(state: QAState):
         
         response = llm.invoke(messages)
         return {
-            "qa_answer": response.content.strip(),
+            "qa_answer": response.content.strip() + truncation_notice(response),
             "dict_suggestions": "[]" # このモードでは辞書データは不要
         }
         pass
@@ -206,7 +207,8 @@ def qa_agent_node(state: QAState):
         answer_text = answer_part.replace("[回答]", "").strip()
         dict_json_str = dict_part.strip()
     except ValueError:
-        answer_text = raw_output
+        # [辞書データ] まで届かなかった（上限で回答の途中で切れた場合を含む）
+        answer_text = raw_output.replace("[回答]", "").strip() + truncation_notice(response)
         dict_json_str = "[]"
         
     print("QA Agent 作業終了")

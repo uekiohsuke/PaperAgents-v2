@@ -6,7 +6,7 @@ os.environ["PAPER_AGENT_SETTINGS_PATH"] = os.path.join(tempfile.mkdtemp(), "llm_
 
 import fitz
 import pytest
-from typing import Any, List
+from typing import Any, List, Optional
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -19,6 +19,7 @@ class RecordingFakeLLM(BaseChatModel):
     responses: List[str]
     calls: List[List[BaseMessage]] = []
     index: int = 0
+    finish_reason: Optional[str] = None  # "length" で出力上限による打ち切りを再現する
 
     @property
     def _llm_type(self) -> str:
@@ -28,7 +29,8 @@ class RecordingFakeLLM(BaseChatModel):
         self.calls.append(list(messages))
         text = self.responses[min(self.index, len(self.responses) - 1)]
         self.index += 1
-        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=text))])
+        metadata = {"finish_reason": self.finish_reason} if self.finish_reason else {}
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=text, response_metadata=metadata))])
 
     def all_text(self, call_index: int = -1) -> str:
         """指定した呼び出しで渡された全メッセージの本文を連結して返す"""
@@ -44,8 +46,8 @@ class RecordingFakeLLM(BaseChatModel):
 @pytest.fixture
 def fake_llm(monkeypatch):
     """fake_llm(module, *responses) でそのモジュールの llm を差し替える"""
-    def _install(module, *responses, attr="llm"):
-        llm = RecordingFakeLLM(responses=list(responses), calls=[])
+    def _install(module, *responses, attr="llm", finish_reason=None):
+        llm = RecordingFakeLLM(responses=list(responses), calls=[], finish_reason=finish_reason)
         monkeypatch.setattr(module, attr, llm)
         return llm
     return _install
