@@ -84,7 +84,6 @@ def test_agent_rejects_unknown_task(client):
     assert client.post("/api/agent", json=agent_request("nope")).status_code == 422
 
 
-@pytest.mark.xfail(reason="フロントは action_type='library' を送るため、RAG検索クエリが質問文ではなく 'library' になる", strict=True)
 def test_library_rag_query_is_user_question(client, graph_spy, monkeypatch):
     queries = []
 

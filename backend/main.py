@@ -146,7 +146,8 @@ async def run_agent(request: AgentRequest):
             else:
                 print("⚠️ pdf_parserが未初期化のため、フロントエンドの文脈をそのまま使用します。")
         elif request.task_type == "library":
-            search_query = request.payload.action_type or request.payload.user_intent or ""
+            # action_type はフロントが固定値 "library" を送るため検索語に使わない
+            search_query = request.payload.user_intent or request.payload.selected_text or ""
             if pdf_parser is not None and getattr(pdf_parser, "vectorstore", None) is not None:
                 print(f"🔍 RAG検索を実行中: {search_query}")
                 search_result = pdf_parser.similarity_search(search_query)
