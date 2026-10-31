@@ -7,11 +7,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ※注意: 画像を処理するため、Vision対応モデル（qwen-vl-chat, gpt-4oなど）を指定してください
+# ※注意: 画像を処理するため、LOCAL_OPENAI_VISION_MODEL_NAME にVision対応モデル（qwen-vl-chat, gpt-4oなど）を指定してください
 llm = ChatOpenAI(
     base_url=os.environ.get("LOCAL_OPENAI_BASE_URL", "http://127.0.0.1:1234/v1"),
     api_key=os.environ.get("LOCAL_OPENAI_API_KEY") or "dummy",  # 空文字は新しい openai が拒否する
-    model=os.environ.get("LOCAL_OPENAI_VISION_MODEL_NAME", "qwen-vl-chat"), 
+    # Vision用モデルが未設定なら通常のモデルを使う
+    model=os.environ.get("LOCAL_OPENAI_VISION_MODEL_NAME") or os.environ.get("LOCAL_OPENAI_MODEL_NAME", "qwen3:14b"),
     temperature=0.2,
 )
 

@@ -52,6 +52,11 @@ class AppState(TypedDict):
 # 🧭 ルーティング関数 (Supervisor)
 # ==========================================
 def route_task(state: AppState) -> str:
+    # 図表解説は画像をそのままVisionモデルに渡すため、OCRを通さない
+    if state.get("intent") == "chart":
+        print("🧭 [Supervisor] Intent [chart] を確認。 -> Chart Agent へ回送（OCRなし）")
+        return "ChartNode"
+
     # 🌟 画像があって、かつOCRがまだ終わっていなければ、問答無用でOCRへ回送
     # OCRが空文字を返した場合も「完了」とみなす（再度OCRNodeへ回すとグラフに分岐先がなく落ちる）
     if state.get("raw_image") and state.get("extracted_text") is None:
