@@ -172,9 +172,33 @@ def test_run_preview_error(client, preview_env):
     assert r["status"] == "error" and "bad" in r["error"]
 
 
-@pytest.mark.xfail(reason="'python' をPATHから探すため、venv未有効化で起動するとvenv外のPythonで実行される（sys.executable を使うべき）", strict=True)
 def test_run_preview_uses_server_python(client, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     r = client.post("/api/run_preview", json={"code": "import sys; print(sys.executable)"}).json()
     assert r.get("output", "").strip() == sys.executable
+
+
+def test_run_preview_timeout_kills_process(client, preview_env, monkeypatch):
+    monkeypatch.setattr(main, "PREVIEW_TIMEOUT", 1.0)
+    pid_file = preview_env / "pid"
+    code = f"import os, time\nopen({str(pid_file)!r}, 'w').write(str(os.getpid()))\ntime.sleep(30)"
+    r = client.post("/api/run_preview", json={"code": code}).json()
+    assert r["status"] == "error" and "タイムアウト" in r["error"]
+    pid = int(pid_file.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_run_preview_concurrent_requests_do_not_collide(preview_env):
+    import asyncio
+    import httpx
+
+    async def run_both():
+        transport = httpx.ASGITransport(app=main.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            codes = [f"import time\ntime.sleep(0.5)\nprint({i})" for i in range(2)]
+            return await asyncio.gather(*[ac.post("/api/run_preview", json={"code": c}) for c in codes])
+
+    results = [r.json() for r in asyncio.run(run_both())]
+    assert results == [{"status": "success", "output": "0\n"}, {"status": "success", "output": "1\n"}]

@@ -14,6 +14,8 @@ from fastapi import UploadFile, File
 import os
 import shutil
 import base64
+import sys
+import tempfile
 
 pdf_parser = None 
 print("✅ サーバーを立ち上げました。PDFのアップロードを待機しています。")
@@ -221,52 +223,59 @@ async def run_agent(request: AgentRequest):
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+PREVIEW_TIMEOUT = 5.0  # 秒
+
 @app.post("/api/run_preview")
 async def run_preview(request: Request):
     data = await request.json()
     code = data.get("code", "")
 
-    # 🌟 ハック: GUIを抑制し、plt.show() を画像保存に強制置換する
-    safe_code = (
-        "import matplotlib\n"
-        "matplotlib.use('Agg')\n" # バックエンド描画モードを強制
-    ) + code.replace("plt.show()", "plt.savefig('temp_preview.png', bbox_inches='tight')")
+    # 同時実行で衝突しないよう、リクエストごとに一時ディレクトリを分ける
+    with tempfile.TemporaryDirectory(prefix="paper_agent_preview_") as work_dir:
+        script_path = os.path.join(work_dir, "sim.py")
+        image_path = os.path.join(work_dir, "preview.png")
 
-    # 一時ファイルとして書き出し
-    with open("temp_sim.py", "w", encoding="utf-8") as f:
-        f.write(safe_code)
+        # 🌟 ハック: GUIを抑制し、plt.show() を画像保存に強制置換する
+        safe_code = (
+            "import matplotlib\n"
+            "matplotlib.use('Agg')\n" # バックエンド描画モードを強制
+        ) + code.replace("plt.show()", f"plt.savefig({image_path!r}, bbox_inches='tight')")
 
-    try:
-        # サブプロセスで別スレッドとして実行（メインアプリをフリーズさせない）
-        # タイムアウトを設けて無限ループを防止
-        process = await asyncio.create_subprocess_exec(
-            "python", "temp_sim.py",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=5.0)
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write(safe_code)
 
-        if process.returncode != 0:
-            return {"status": "error", "error": stderr.decode()}
+        process = None
+        try:
+            # サーバー自身のPython（venv）で実行する。PATH上の python はvenv外の場合がある
+            process = await asyncio.create_subprocess_exec(
+                sys.executable, script_path,
+                cwd=work_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=PREVIEW_TIMEOUT)
 
-        # グラフ画像が生成されていればBase64に変換して返す
-        if os.path.exists("temp_preview.png"):
-            with open("temp_preview.png", "rb") as img:
-                b64 = base64.b64encode(img.read()).decode("utf-8")
-            os.remove("temp_preview.png")
-            return {"status": "success", "image": f"data:image/png;base64,{b64}"}
-        else:
-            # 画像が出ない計算コード等の場合
-            return {"status": "success", "output": stdout.decode()}
+            if process.returncode != 0:
+                return {"status": "error", "error": stderr.decode()}
 
-    except asyncio.TimeoutError:
-        return {"status": "error", "error": "実行がタイムアウトしました（5秒）。動的シミュレーション、または計算が重すぎます。"}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
-    finally:
-        # 実行用の一時ファイルを掃除
-        if os.path.exists("temp_sim.py"):
-            os.remove("temp_sim.py")
+            # グラフ画像が生成されていればBase64に変換して返す
+            if os.path.exists(image_path):
+                with open(image_path, "rb") as img:
+                    b64 = base64.b64encode(img.read()).decode("utf-8")
+                return {"status": "success", "image": f"data:image/png;base64,{b64}"}
+            else:
+                # 画像が出ない計算コード等の場合
+                return {"status": "success", "output": stdout.decode()}
+
+        except asyncio.TimeoutError:
+            return {"status": "error", "error": f"実行がタイムアウトしました（{PREVIEW_TIMEOUT:g}秒）。動的シミュレーション、または計算が重すぎます。"}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+        finally:
+            # タイムアウト・例外時に子プロセスを残さない
+            if process is not None and process.returncode is None:
+                process.kill()
+                await process.wait()
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
