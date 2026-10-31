@@ -525,17 +525,38 @@ function App() {
     }
   }, []);
 
-  // 🌟 追加: ネットワーク画面から既読PDFをReaderで開き直す関数
-  const handleSwitchPdf = useCallback((node: any) => {
-    // ノードに刻まれた fileName（なければid）を使ってファイルを探す
-    const targetFileName = node.fileName || node.id;
-    const file = pdfFilesMap[targetFileName];
-    
-    if (!file) {
-      alert("このファイルのデータがメモリ上にありません。\n（ブラウザをリロードするとメモリは消去されます。お手数ですが再度アップロードしてください）");
-      return;
-    }
+  // 🌟 追加: backendの解析結果（目次・参考文献・引用ページ）を画面に反映する
+  const applyPdfInfo = (data: any) => {
+    // Pythonのフォーマット [level, title, page_num] をフロントエンド用にマッピングして「仮セット」する
+    const fallbackOutline = (data.toc || []).map((item: any[]) => ({
+      title: item[1], // "1 はじめに" などの文字列
+      dest: item[2],  // ページ番号
+      level: item[0]  // インデント表示などに使える階層レベル
+    }));
+    setOutline(fallbackOutline);
+    setReferences(data.references || {});
+    setCitationPages(data.citation_pages || {});
+  };
 
+  const uploadPdf = async (file: File) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    const res = await fetch("http://127.0.0.1:8000/api/upload", { method: "POST", body: formData });
+    if (!res.ok) throw new Error(`アップロードに失敗しました (${res.status})`);
+    return res.json();
+  };
+
+  // 切り替え先PDFの解析結果をbackendから取得する（サーバー再起動などで無ければ再アップロードする）
+  const loadPdfInfo = async (file: File) => {
+    const res = await fetch(`http://127.0.0.1:8000/api/pdf_info?pdf_id=${encodeURIComponent(file.name)}`);
+    if (res.ok) return res.json();
+    if (res.status === 404) return uploadPdf(file);
+    throw new Error(`PDF情報の取得に失敗しました (${res.status})`);
+  };
+
+  // 表示中のPDFを切り替える。スレッドと pdfFile は同時に入れ替える
+  // （ずれると、threads を保存する useEffect が新しいスレッドを旧PDFのキーで保存してしまう）
+  const openPdf = useCallback((file: File, info: any) => {
     if (pdfUrl) URL.revokeObjectURL(pdfUrl);
 
     // 🌟 そのPDF用のチャット履歴を復元する
@@ -547,15 +568,39 @@ function App() {
     }
 
     setActiveThreadId("main-thread");
+    setOaStatuses({});
     setSelectedText("");
     setCroppedImage(null);
     setMenuPos(null);
+    applyPdfInfo(info);
 
     // ファイルをセットしてReaderモードへ遷移！
     setPdfFile(file);
     setPdfUrl(URL.createObjectURL(file));
     setViewMode("reader");
-  }, [pdfFilesMap, pdfUrl]);
+  }, [pdfUrl]);
+
+  // 🌟 追加: ネットワーク画面から既読PDFをReaderで開き直す関数
+  const handleSwitchPdf = useCallback((node: any) => {
+    // ノードに刻まれた fileName（なければid）を使ってファイルを探す
+    const targetFileName = node.fileName || node.id;
+    const file = pdfFilesMap[targetFileName];
+    
+    if (!file) {
+      alert("このファイルのデータがメモリ上にありません。\n（ブラウザをリロードするとメモリは消去されます。お手数ですが再度アップロードしてください）");
+      return;
+    }
+
+    // このPDFの解析結果（目次・参考文献）を取得してから、まとめて切り替える
+    // （先に開くと PDFネイティブの目次を backend の目次で上書きし、
+    //   先にスレッドだけ入れ替えると旧PDFのキーで保存されてしまうため）
+    setIsUploading(true);
+    loadPdfInfo(file).catch(error => {
+      console.error("PDF情報の取得エラー:", error);
+      alert("PDFの解析結果を取得できませんでした。");
+      return {};
+    }).then(info => openPdf(file, info)).finally(() => setIsUploading(false));
+  }, [pdfFilesMap, openPdf]);
 
   const handleFocusNode = useCallback((node: any) => {
     // 🌟 修正: 座標が確定していなくても、詳細パネルは必ず開く
@@ -709,52 +754,16 @@ function App() {
 // 🌟 追加: ファイルをバックエンドに送信し、解析結果を受け取る
   const handleFileUpload = async (file: File) => {
     setPdfFilesMap(prev => ({ ...prev, [file.name]: file }));
-
-    if (pdfUrl) URL.revokeObjectURL(pdfUrl);
-    
-    // 保存されたスレッド履歴を復元、なければ初期化
-    const savedThreads = localStorage.getItem(`pdf_threads_${file.name}`);
-    if (savedThreads) {
-      setThreads(JSON.parse(savedThreads));
-    } else {
-      setThreads([{ id: "main-thread", title: "メインスレッド", isMain: true, isCollapsed: false, messages: [] }]);
-    }
-    
-    setActiveThreadId("main-thread");
-    setOaStatuses({});
-    setSelectedText("");
-    setCroppedImage(null);
-    setMenuPos(null);
-
     setIsUploading(true);
-    const formData = new FormData();
-    formData.append("file", file);
     
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/upload", {
-        method: "POST",
-        body: formData,
-      });
-      const data = await res.json();
+      const data = await uploadPdf(file);
       if (data.references) {
         mergeToGlobalGraph(file.name, data.references, data.citation_pages);
       }
       
-      // 🌟 変更: Pythonのフォーマット [level, title, page_num] をフロントエンド用にマッピングして「仮セット」する
-      const fallbackOutline = (data.toc || []).map((item: any[]) => ({
-        title: item[1], // "1 はじめに" などの文字列
-        dest: item[2],  // ページ番号
-        level: item[0]  // インデント表示などに使える階層レベル
-      }));
-      setOutline(fallbackOutline); // ※State名が setToc の場合は setToc にしてください
-      
-      // 参考文献とページ情報のセット
-      setReferences(data.references || {});
-      setCitationPages(data.citation_pages || {});
-      
-      setPdfFile(file);
-      setPdfUrl(URL.createObjectURL(file));
-      setViewMode("reader");
+      // 解析が終わってから、目次・参考文献・スレッドごと新しいPDFに切り替える
+      openPdf(file, data);
       
     } catch (error) {
       console.error("アップロードエラー:", error);
@@ -1324,7 +1333,8 @@ const askLibraryAgent = async (text: string) => {
         signal: abortControllerRef.current.signal,
         body: JSON.stringify({
           task_type: taskType,
-          context: { paper_metadata: "Sample Physics Report", current_context: currentContext },
+          // pdf_id: backendが文脈・参考文献を引くPDF（ライブラリ内のファイル名）
+          context: { paper_metadata: "Sample Physics Report", current_context: currentContext, pdf_id: pdfFile?.name },
           payload: payload,
           chat_history: historyForBackend
         })
