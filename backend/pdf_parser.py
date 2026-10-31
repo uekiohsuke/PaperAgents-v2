@@ -98,7 +98,14 @@ class PaperParser:
         self._build_vectorstore()
 
     def _extract_references(self):
-        ref_split = re.split(r'参考文献|References', self.full_text, flags=re.IGNORECASE)
+        # 見出しとして1行に単独で書かれた「References」等を優先する（本文やタイトル中の単語で切らないため）
+        headings = list(re.finditer(
+            r'^[ \t]*(?:\d+\.?[ \t]*)?(?:参考文献|References|Bibliography)[ \t]*:?[ \t]*$',
+            self.full_text, flags=re.IGNORECASE | re.MULTILINE))
+        if headings:
+            ref_split = [self.full_text[:headings[-1].start()], self.full_text[headings[-1].end():]]
+        else:
+            ref_split = re.split(r'参考文献|References', self.full_text, flags=re.IGNORECASE)
         
         if len(ref_split) > 1:
             ref_section = ref_split[-1] 
@@ -111,13 +118,31 @@ class PaperParser:
                 ref_text = match[1].strip().replace('\n', ' ') 
                 self.references[ref_num] = ref_text
 
+    @staticmethod
+    def _expand_citation_numbers(group: str) -> set:
+        """"1,2" や "1-3" のような角括弧内の引用番号を {1, 2, 3} に展開する"""
+        numbers = set()
+        for part in re.split(r'\s*,\s*', group):
+            bounds = re.split(r'\s*[-–—]\s*', part)
+            if len(bounds) == 2 and 0 <= int(bounds[1]) - int(bounds[0]) <= 100:
+                numbers.update(range(int(bounds[0]), int(bounds[1]) + 1))
+            else:
+                numbers.update(int(b) for b in bounds)
+        return numbers
+
     def _map_citation_pages(self):
         for ref_num in self.references.keys():
             self.citation_pages[ref_num] = []
-            pattern = re.compile(re.escape(ref_num))
-            
-            for page_num, text in self.page_texts.items():
-                if pattern.search(text):
+
+        # [1] だけでなく [1,2] や [1-3] のような複合引用も対象にする
+        pattern = re.compile(r'\[(\d+(?:\s*[,\-–—]\s*\d+)*)\]')
+        for page_num, text in self.page_texts.items():
+            cited = set()
+            for match in pattern.finditer(text):
+                cited |= self._expand_citation_numbers(match.group(1))
+            for number in sorted(cited):
+                ref_num = f"[{number}]"
+                if ref_num in self.citation_pages:
                     self.citation_pages[ref_num].append(page_num)
 
     def get_context_around(self, search_text: str, window_size: int = 400) -> str:

@@ -58,7 +58,6 @@ def test_no_references_section(make_pdf, no_vectorstore):
     assert p.citation_pages == {}
 
 
-@pytest.mark.xfail(reason="本文中の単語 'references' 以降を参考文献欄とみなしてしまう（最後の出現で分割）", strict=True)
 def test_reference_titles_containing_word_references(make_pdf, no_vectorstore):
     p = PaperParser(make_pdf([
         ["Body [1]"],
@@ -67,10 +66,22 @@ def test_reference_titles_containing_word_references(make_pdf, no_vectorstore):
     assert set(p.references) == {"[1]", "[2]"}
 
 
-@pytest.mark.xfail(reason="[1,2] や [1-3] 形式の複合引用はページマッピングされない", strict=True)
 def test_grouped_citations_are_mapped(make_pdf, no_vectorstore):
     p = PaperParser(make_pdf([
         ["Body text [1,2]."],
         ["References", "[1] A. One, 2001.", "[2] B. Two, 2002."],
     ]))
     assert 1 in p.citation_pages["[1]"]
+
+
+
+def test_citation_ranges_are_expanded(make_pdf, no_vectorstore):
+    p = PaperParser(make_pdf([
+        ["Body text [1-3] and [5]."],
+        ["More [2, 4]."],
+        ["References", "[1] A, 2001.", "[2] B, 2002.", "[3] C, 2003.", "[4] D, 2004.", "[5] E, 2005."],
+    ]))
+    assert p.citation_pages["[1]"] == [1, 3]
+    assert p.citation_pages["[2]"] == [1, 2, 3]
+    assert p.citation_pages["[4]"] == [2, 3]
+    assert p.citation_pages["[5]"] == [1, 3]
